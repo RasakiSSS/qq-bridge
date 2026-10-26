@@ -20,6 +20,13 @@ import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as stateAcl from '../src/state-acl.mjs';
+import * as qzone from '../src/qzone.js';
+import * as qzoneAgent from '../src/qzone-agent.js';
+import * as sharedMemory from '../src/shared-memory.js';
+import * as memoryQzone from '../src/shared-memory-qzone.js';
+import * as memoryWorker from '../src/shared-memory-worker.js';
+import * as relationshipControl from '../src/relationship-control.js';
+import * as nativeFriends from '../src/native-friend-client.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -39,7 +46,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content));
   }
-  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [] };
+  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [], requests: [], requestHandlers: [] };
   // 语音发送在桥接里是**直接 fetch 网关**（与文本/表情共用 sendChain，但要自己带 record 段），
   // 所以这里给 VM 注入一个记录型 fetch：既不让测试真的发 QQ 消息，又能断言发出的段内容。
   const fakeFetch = async (url, init = {}) => {
@@ -86,6 +93,13 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     callUnary: async (method, params) => { calls.cancelled.push({ method, params }); return success({ accepted: true }); },
   };
   class FakeBot {
+    constructor() { this.requestHandlers = new Map(); }
+    onRequest(type, handler) {
+      this.requestHandlers.set(String(type), handler);
+      calls.requestHandlers.push(String(type));
+      return () => { if (this.requestHandlers.get(String(type)) === handler) this.requestHandlers.delete(String(type)); };
+    }
+    emitRequest(type, event) { return this.requestHandlers.get(String(type))?.(event); }
     async sendPrivateMessage(id, text) { calls.sent.push({ kind: 'private', id, text }); }
     async sendGroupMessage(id, text) { calls.sent.push({ kind: 'group', id, text }); }
     async getImage({ file }) {
@@ -94,7 +108,10 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       return { base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+k3ioAAAAASUVORK5CYII=' };
     }
     async fetchFaceEntity(id) { calls.faces.push(id); return null; }
-    async request() { return { status: 'ok', retcode: 0, data: [{ emoji_id: 'fixture-sticker', url: 'https://public.invalid/sticker' }] }; }
+    async request(action, params) {
+      calls.requests.push({ action, params });
+      return { status: 'ok', retcode: 0, data: [{ emoji_id: 'fixture-sticker', url: 'https://public.invalid/sticker' }] };
+    }
   }
   let source = fs.readFileSync(path.join(root, 'src/bridge.js'), 'utf8');
   // 去掉顶层 import（VM 里靠 context 注入提供这些绑定）。
@@ -123,6 +140,12 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
+    pendingWakeKeys, disarmPendingWakeLease,
+    peakSleepTickV2, peakSleepBlocksV2, automaticModelBlockedV2,
+    qzoneService, qzoneAgent, assertQzoneAllowed, sharedMemory, recallForConversation, memoryWorker, assertMemoryModelAllowed,
+    scheduleWakeV2, scheduleReplyCheckV2, scheduleProactiveCheckV2,
+    runSlangExtraction, runSlangResearch, slangWindows, slangEntries, feedSlangWindow,
+    acknowledgeMessagesV2, noteModelMessagesV2, loadSocialV2State,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
@@ -138,6 +161,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     flushQueue, retireSession,
     voiceCfg, voiceLibrary, resolveVoicePathForV2, resolveVoicePathForOperator,
     voiceBudgetCheck, sendVoiceV2, sendVoiceForV2, assertOutboundAuditOk,
+    syncStickerLibrary, getStickerEntries() { return stickerEntries; },
     setMode(value) { currentMode = value; },
     setReady(value) { dshReady = value; },
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
@@ -160,7 +184,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -189,10 +213,11 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   vm.runInContext(`Object.assign(globalThis, (() => { ${modelViewSource}\nreturn { compactModelMessage, compactModelData, serializeModelData }; })());`, context);
   vm.runInContext(source + '\nglobalThis.auditReady = main();', context);
   const bridge = await context.auditReady;
-  bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2']);
+  bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2', 'qq-chat-v2-files', 'qq-qzone', 'qq-memory']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
     for (const timer of timers) clearTimeout(timer);
+    bridge.sharedMemory.close();
     fs.rmSync(temp, { recursive: true, force: true });
   } };
 }

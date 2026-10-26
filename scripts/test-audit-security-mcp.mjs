@@ -121,6 +121,27 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null) {
   };
 }
 
+test('shared memory MCP carries current identity, validates evidence and propagates permission denial', async () => {
+  const requests = [];
+  const call = loadSnowlumaTools(async (url, init) => {
+    requests.push({ url: String(url), init });
+    return { ok: false, status: 403, text: async () => 'fixture permission denied' };
+  }, { consolePort: 3100, consoleToken: 'fixture-only', socialV2: { sharedMemory: { enabled: true } } });
+  for (const [name, args] of [
+    ['qq_recall', { people: ['123'], query: '约定' }],
+    ['qq_remember', { note: { kind: 'impression', personQQ: '123', text: '喜欢海边', evidenceIds: ['e_fixture'] } }],
+    ['qq_forget', { ids: ['e_fixture'] }],
+  ]) {
+    const result = await call(name, { key: 'group:456', token: 'fixture-agent-token', ...args });
+    assert.equal(result.isError, true);
+    assert.equal(requests.at(-1).init.headers['x-agent-token'], 'fixture-agent-token');
+    assert.equal(JSON.parse(requests.at(-1).init.body).key, 'group:456');
+  }
+  await assert.rejects(call('qq_recall', { key: 'group:456', token: '' }));
+  await assert.rejects(call('qq_remember', { key: 'group:456', token: 't', note: { kind: 'fact', text: '猜测', evidenceIds: [] } }));
+  assert.equal(requests.length, 3);
+});
+
 // 回归（issue #24）：`qq_wait_for_messages` 以前走全局 fetch（undici 自带 300s headersTimeout），
 // 而沉睡前观察的预算就是 300s —— 第 301 秒必然 `fetch failed`，桥接侧却还在跑满预算占着
 // activeWaits，AI 只能重试烧 token。现在必须走 node:http 长轮询（没有默认响应超时）。
@@ -228,4 +249,63 @@ test('denied legacy group reads never reveal the group allowlist', async () => {
     }
     assert.equal(calls.length, 2, 'only the two authorization checks should reach the bridge');
   }
+});
+
+test('Qzone MCP delegates scoped identity and structured mentions; disabled tools absent', async () => {
+  const calls = [];
+  const call = loadSnowlumaTools(async (url, init) => { calls.push({ url: String(url), init }); return Response.json({ ok: true }); },
+    { consoleToken: 'fixture-console-token', socialV2: { qzone: { enabled: true } } });
+  const args = { key: 'private:123', token: 'fixture-token', content: '测试', mentions: ['2'], postKey: 'post:2:one', commentKey: 'comment' };
+  for (const name of ['status', 'browse', 'publish', 'comment', 'reply']) {
+    const result = await call('qq_qzone_' + name, args); assert.notEqual(result.isError, true);
+    const request = calls.at(-1);
+    assert.equal(new URL(request.url).pathname, '/api/socialV2/qzone/' + name);
+    assert.equal(request.init.headers['x-agent-token'], 'fixture-token');
+    assert.equal(request.init.headers['x-agent-call'], '1');
+    if (name === 'publish') assert.deepEqual(JSON.parse(request.init.body), { key: args.key, content: args.content, mentions: ['2'] });
+  }
+  await assert.rejects(call('qq_qzone_publish', { ...args, token: '' })); assert.equal(calls.length, 5);
+  for (const socialV2 of [{}, { qzone: { enabled: true }, tools: { qzonePublish: false } }]) {
+    const disabled = loadSnowlumaTools(async () => assert.fail('disabled transport'), { socialV2 });
+    await assert.rejects(disabled('qq_qzone_publish', args), /should be registered/);
+  }
+});
+
+test('qq_delete_sticker delegates one explicit target and its session token only to the bridge', async () => {
+  const calls = [];
+  const callTool = loadSnowlumaTools(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json({ ok: true, deleted: true, stickerId: 'fixture-sticker', localPersisted: true });
+  }, { consoleToken: 'fixture-console-token' });
+  const result = await callTool('qq_delete_sticker', { key: 'group:456', token: 'fixture-session-token', stickerId: 'fixture-sticker' });
+  assert.notEqual(result.isError, true);
+  assert.equal(JSON.parse(result.content[0].text).deleted, true);
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].url).pathname, '/api/socialV2/delete-sticker');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers['x-agent-token'], 'fixture-session-token');
+  assert.equal(calls[0].init.headers['x-agent-call'], '1');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { key: 'group:456', stickerId: 'fixture-sticker' });
+});
+
+test('qq_delete_sticker is absent when its toggle or the sticker system is disabled', async () => {
+  for (const socialV2 of [{ tools: { deleteSticker: false } }, { sticker: { enabled: false } }]) {
+    const callTool = loadSnowlumaTools(async () => assert.fail('disabled tool must never access the transport'), { socialV2 });
+    await assert.rejects(callTool('qq_delete_sticker', { key: 'group:456', token: 'fixture-token', stickerId: 'fixture' }), /should be registered/);
+  }
+});
+
+test('qq_delete_sticker rejects empty tokens and batch targets before transport; reports gateway errors', async () => {
+  let calls = 0;
+  const callTool = loadSnowlumaTools(async () => {
+    calls++;
+    return Response.json({ ok: false, error: 'fixture delete rejected' }, { status: 502 });
+  }, {});
+  for (const args of [{ token: '' }, { stickerId: ['one', 'two'] }, { stickerId: '' }]) {
+    await assert.rejects(callTool('qq_delete_sticker', { key: 'group:456', token: 'fixture-token', stickerId: 'fixture', ...args }));
+  }
+  assert.equal(calls, 0);
+  const result = await callTool('qq_delete_sticker', { key: 'group:456', token: 'fixture-token', stickerId: 'fixture' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /fixture delete rejected/);
 });

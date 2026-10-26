@@ -14,6 +14,7 @@ const tests = [
   // 且只留下一行日志 —— 必须有登记期断言钉住（活 DSH 侧的实测见
   // scripts/test-dsh-session-retire.mjs）。
   'test-dsh-inbox-projection.mjs',
+  'test-dsh-tool-update-workaround.mjs',
   'test-md-to-plain.mjs', 'test-slang-learn.mjs', 'test-mux-reconnect.mjs',
   'test-token-economy.mjs', 'test-qq-model-view.mjs', 'test-qq-preset-contract.mjs',
   'test-reply-wait.mjs', 'test-preset-prompt.mjs', 'test-role-card.mjs',
@@ -31,6 +32,11 @@ const tests = [
   // 二代「会话初始提示词」：只在首次唤醒注入、管理面隔离、损坏文件只读降级、
   // 以及控制台「立即唤醒」不得顶掉首次 bootstrap（否则初始提示词永远发不出去）。
   'test-v2-initial-prompt.mjs',
+  'test-delete-sticker.mjs',
+  // 北京时间峰谷切换、管理员私聊豁免、积压/有限睡眠恢复与异步投递边界。
+  'test-peak-sleep.mjs',
+  'test-qzone.mjs',
+  'test-shared-memory.mjs', 'test-shared-memory-worker.mjs', 'test-shared-memory-api.mjs',
   // 令牌账本 / 价目表 与 体检修复回归（纯函数，无外部依赖）
   'test-token-usage.mjs', 'test-hardening.mjs',
   // 语音发送（纯函数 + 端点存在性；真发语音只在 --live 或 CLI 里做）
@@ -66,6 +72,7 @@ const tests = [
   //   · 静默检测不得冒充 hook 检测（心跳是 SnowLuma 本地定时器无条件发的）；
   //   · 客户端库版本不得低于 bot_status 出现的版本。
   'test-snowluma-upstream-health.mjs',
+  'test-snowluma-websocket.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

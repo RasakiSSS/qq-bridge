@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "expectedUin": "REPLACE_WITH_BOT_ACCOUNT",
+  "qqVersion": "REPLACE_WITH_VERIFIED_VERSION",
+  "wrapperSha256": "REPLACE_WITH_VERIFIED_SHA256",
+  "reportDir": "REPLACE_WITH_ABSOLUTE_REPORT_DIRECTORY",
+  "timeoutMs": 120000
+}

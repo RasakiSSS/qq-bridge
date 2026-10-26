@@ -1,8 +1,8 @@
 {
   "dsh": {
     "baseUrl": "http://127.0.0.1:3080",
-    "provider": "deepseek-official",
-    "model": "deepseek-flash",
+    "provider": "dsh-new",
+    "model": "deepseek-v4.1-flash",
     "reasoningEffort": "max",
     "authToken": "",
     "authHeader": "authorization",
@@ -106,11 +106,50 @@
     "longGapMaxMs": 10000
   },
   "socialV2": {
+    "sharedMemory": {
+      "enabled": true,
+      "consolidate": true,
+      "promptMaxChars": 4000,
+      "intervalMs": 1800000,
+      "batchSize": 30
+    },
     "enabled": true,
+    "peakSleep": {
+      "enabled": true
+    },
+    "qzone": {
+      "enabled": false,
+      "browseFriends": true,
+      "watchQQ": [],
+      "pollIntervalMs": 1800000,
+      "eventPollIntervalMs": 60000,
+      "dailyPostLimit": 3,
+      "minPostIntervalMs": 10800000,
+      "visibility": "friends",
+      "readComments": true,
+      "autoReplyComments": true,
+      "ownPostsLimit": 20
+    },
+    "relationships": {
+      "enabled": false,
+      "promptPendingRequests": true,
+      "maxPending": 20,
+      "maxHistory": 500,
+      "actions": {
+        "acceptRequests": true,
+        "rejectRequests": true,
+        "deleteFriends": true,
+        "leaveGroups": true,
+        "nativeFriendRequest": false
+      }
+    },
     "autoReplyCheckMs": 30000,
     "agentPreset": "qq-chat-v2",
     "provideRecommendations": true,
     "tools": {
+      "qzoneRead": true,
+      "qzonePublish": true,
+      "qzoneComment": true,
       "getPrompt": true,
       "getUnread": true,
       "getRecent": true,
@@ -128,6 +167,7 @@
       "setWakeConfig": true,
       "markRead": true,
       "memory": true,
+      "relationships": false,
       "slangQuery": true,
       "slangSubmit": true,
       "getImages": true,
@@ -136,6 +176,7 @@
       "listStickers": true,
       "getStickerImage": true,
       "sendSticker": true,
+      "deleteSticker": true,
       "setStickerRemark": false,
       "stickerNote": true,
       "collectSticker": true,

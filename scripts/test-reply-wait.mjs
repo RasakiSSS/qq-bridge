@@ -27,7 +27,7 @@ async function fixture(run, cfg = {}) {
       res.on('end', () => resolve({ status: res.statusCode, data: JSON.parse(raw) }));
     });
     req.on('error', reject);
-    req.setTimeout(5000, () => req.destroy(new Error('Fixture request timed out')));
+    req.setTimeout(20000, () => req.destroy(new Error('Fixture request timed out')));
     req.end(body === undefined ? undefined : JSON.stringify({ key, ...body }));
   });
   // GET routes carry their options in the query string, not the body.
@@ -46,7 +46,7 @@ async function fixture(run, cfg = {}) {
     req.end();
   });
   const append = text => h.appendSocialV2Message(key, 'fixture-person', text, text, false, false, `fixture-${st.lastUnreadSeq + 1}`, [], '789', []);
-  try { await run({ h, key, st, request, get, append }); }
+  try { await run({ h, key, st, request, get, append, port: server.address().port }); }
   finally { await new Promise(resolve => server.close(resolve)); await h.close(); }
 }
 
@@ -131,6 +131,82 @@ test('ordinary and omitted purpose keep waiting for future messages', () => fixt
     assert.equal(result.data.quiet, false);
     assert.deepEqual(result.data.newMessages, []);
   }
+}));
+
+test('messages wait returns supplements received before the call without waiting the full budget', () => fixture(async ({ st, request, append }) => {
+  append('known'); await request('unread'); append('new while thinking');
+  st.lastIncomingAt = Date.now() - 1000;
+  const result = await request('wait', { timeoutMs: 2000, quietMs: 100 });
+  assert.ok(result.data.waitedMs < 700);
+  assert.equal(result.data.arrived, true);
+  assert.deepEqual(result.data.newMessages.map(m => m.seq), [2]);
+  assert.equal(st.unread.length, 2);
+}));
+
+test('messages quiet window cannot exceed timeout even under continuous traffic', () => fixture(async ({ st, request, append }) => {
+  append('known'); await request('unread');
+  const timer = setInterval(() => append('continuing'), 80);
+  try {
+    const result = await request('wait', { timeoutMs: 400, quietMs: 1000 });
+    assert.ok(result.data.waitedMs >= 400 && result.data.waitedMs < 900);
+    assert.equal(result.data.quiet, false); assert.equal(result.data.timeout, true);
+    assert.equal(result.data.preSleepWaitSatisfied, false);
+    assert.ok(result.data.newMessages.length > 0);
+  } finally { clearInterval(timer); }
+}));
+
+test('manual pause promptly interrupts a long messages wait', () => fixture(async ({ h, request }) => {
+  const timer = setTimeout(() => { h.socialV2.paused = true; }, 120);
+  const started = Date.now();
+  try {
+    const result = await request('wait', { timeoutMs: 300000 });
+    assert.equal(result.status, 403); assert.ok(Date.now() - started < 1000);
+  } finally { clearTimeout(timer); }
+}));
+
+test('oversized silence copied from sleep timeout is capped independently of the long budget', () => fixture(async ({ h, request, append }) => {
+  h.cfg.socialV2.wait.maxQuietMs = 300000;
+  const timer = setTimeout(() => append('arrived during sleep observation'), 100);
+  try {
+    const result = await request('wait', { timeoutMs: 300000, quietMs: 300000 });
+    assert.equal(result.data.quietMs, 12000);
+    assert.ok(result.data.waitedMs >= 12000 && result.data.waitedMs < 15000);
+    assert.equal(result.data.arrived, true); assert.equal(result.data.preSleepWaitObserved, true);
+    assert.equal(result.data.preSleepWaitSatisfied, false);
+    assert.equal(result.data.newMessages.length, 1);
+  } finally { clearTimeout(timer); }
+}));
+
+test('hard silence cap cannot be raised by configured minimum, maximum or model arguments', () => fixture(async ({ h, request }) => {
+  h.cfg.socialV2.wait.minQuietAfterNewMs = 300000;
+  h.cfg.socialV2.wait.maxQuietMs = 600000;
+  const result = await request('wait', { purpose: 'reply', timeoutMs: 100, quietMs: 300000 });
+  assert.equal(result.data.quietMs, 12000); assert.equal(result.data.timeout, true);
+}));
+
+test('continuous group traffic cannot restart the post-arrival collection budget forever', () => fixture(async ({ h, request, append }) => {
+  h.cfg.socialV2.wait.maxQuietMs = 600000;
+  const timer = setInterval(() => append('busy group traffic'), 60);
+  try {
+    const result = await request('wait', { timeoutMs: 300000, quietMs: 300000 });
+    assert.ok(result.data.waitedMs >= 12000 && result.data.waitedMs < 15000);
+    assert.equal(result.data.arrived, true); assert.equal(result.data.quiet, false);
+    assert.equal(result.data.timeout, true); assert.equal(result.data.preSleepWaitObserved, true);
+    assert.ok(result.data.newMessages.length > 1);
+  } finally { clearInterval(timer); }
+}));
+
+test('disconnect releases the lease without granting observation or consuming messages', () => fixture(async ({ key, st, request, port }) => {
+  const pending = http.request({ hostname: '127.0.0.1', port, path: '/api/socialV2/wait', method: 'POST',
+    headers: { 'x-console-token': 'fixture-console-token', 'x-agent-token': st.agentToken, 'content-type': 'application/json' } });
+  pending.on('error', () => {});
+  pending.end(JSON.stringify({ key, timeoutMs: 300000 }));
+  await new Promise(r => setTimeout(r, 150));
+  assert.equal((await request('wait', { timeoutMs: 100 })).status, 429);
+  pending.destroy(); await new Promise(r => setTimeout(r, 150));
+  const next = await request('wait', { timeoutMs: 100 });
+  assert.equal(next.status, 200);
+  assert.equal(st.preSleepWaitObservedAt, 0); assert.equal(st.preSleepWaitSatisfiedAt, 0);
 }));
 
 test('reply mode rejects a session permission change during its remaining quiet window', () => fixture(async ({ h, st, request, append }) => {

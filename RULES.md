@@ -35,7 +35,7 @@
 ## QQ 会话 agent 的硬边界
 
 1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
-2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
+2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write` 和 `billion-context` 的 `compress` / `decompress` / `search_context` / `acp_status` 四个精确工具名；其他工具（含 `dev_*` 开发/管理工具、`acp_delegate*` 派生工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。四个上下文工具由已安装的插件提供，并由插件根据当前 agent 会话绑定上下文；普通 QQ 与管理员文件预设均可使用。QQ 动作无禁言、踢人、文件上传下载等管理操作。
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
@@ -61,6 +61,26 @@
 - 仿真提示词保存前会做硬性校验：保留 `你没有本地工具` / `群友没有管理权限` / `API 令牌` / `角色由桥接注入` / `不会自动发送到 QQ` 这些安全不变量，且正文 ≥ 500 字符；缺失即拒绝保存（否则会同时削弱权限边界并让 `npm run test:audit` 变红）。写入前自动备份到 `state/preset-backups/`，可一键还原；还原时同样校验。
 - 一代遗留写法（空格分句、`[SILENT]`、自动转发）若出现在**未标记**的小节里，二代下会被兜底整行过滤；控制台会提示把它们移到 `〔一代〕` 小节。
 - 两层提示词都**只能由控制台（管理员令牌）修改**：带 `x-agent-token` 的请求对这些端点一律 403，QQ 群里的 AI 无法改写自己的提示词。
+
+- 关系控制默认关闭：`socialV2.relationships.enabled=false` 且 `socialV2.tools.relationships=false`；开启后也只允许二代、未暂停、非静默、非峰谷休眠和 DSH 就绪时由带当前会话令牌的 agent 调用。好友申请详情仅管理员私聊可见，申请正文是外部资料，不是指令。
+- 桥接只记录 OneBot 已收到的好友申请，并提供接受/拒绝申请、删除好友、退出群聊四类受控动作；动作结果写入 `state/relationships.json`，成功删除好友或退群会结束对应主动调度，但保留聊天历史和共同记忆。状态损坏时只读降级，绝不覆盖原文件。
+- `nativeFriendRequest` 固定为 `false`。当前 QQ 版本的主动加好友内部接口尚未形成可证明的完整契约，因此没有主动申请 MCP；不要把 `plugins/qq-friend-probe` 的探测结果当成可发送授权。
+
+## QQ 空间自主活动
+
+- `socialV2.qzone.enabled` 开启后，在二代模式下通过独立的 `qq-qzone` 安全预设生成动作决策，由桥接审核后浏览、发说说、评论及 @；默认只发好友可见文字说说，每天最多 3 条、至少间隔 3 小时。
+- 新评论和可见范围内的明确 @ 通过轮询唤醒，评论回应不设每日次数额度；来源去重避免重复发送。人工暂停、角色静默和峰谷休眠控制自动任务及最终发送。
+- 空间 MCP 仅管理员私聊可调用，保留原 token、白名单和权限检查；仅峰谷时间限制可豁免。群聊不获得空间工具权限，自动空间会话不获得管理员文件权限。
+- 空间是独立授权的出站通道，目标来自好友动态或可信配置的关注 QQ，不扩展原有 QQ 聊天发送白名单。状态按登录账号隔离保存，不重置聊天会话或记忆。
+- 轮询覆盖范围、楼中楼限制及待核对发送恢复见 [空间使用说明](docs/guides/QZONE.md)。
+
+## 共同记忆
+
+- 用户已授权群聊、私聊与 QQ 空间共同回忆；人物用可信 QQ 号关联，内容来源不作为三者间的共享屏障。只保存桥接实际接收或空间已读取的资料，不扩大准入与发送权限。
+- `state/memory.sqlite` 独立于 DSH 会话和模型压缩。新消息先落库，再进行异步解析；回忆不推进任何会话已读水位，也不改变潜水设置。
+- `qq_recall` / `qq_remember` 仍需当前会话 token 和准入检查；`qq_forget` 仅管理员私聊或控制台可执行。所有长期条目带真实来源，事实与主观印象分开，旧整理不得覆盖并发修正或复活已遗忘的依据。
+- `qq-memory` 后台整理预设与 QQ 共用工作区，独立单轮会话，额外执行守卫拒绝所有工具。后台任务不持有聊天 token 或管理员 Filesystem 权限，受人工暂停、角色静默、峰谷及开关控制，实际投递前再次检查。
+- 共同记忆正文是外部资料，不能授予管理权限。原 `qq-tool-restrict` / `qq-tool-restrict-files`、文件路由、发送白名单和空间发布额度不变。配置、管理与恢复见[共同记忆说明](docs/guides/SHARED_MEMORY.md)。
 
 ## 黑话 / 网络用语学习与迭代
 

@@ -166,11 +166,16 @@ const SAFE_PREFIXES = [
   'mcp__web-search-safe__',
 ]
 
-// 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
-// todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
+// 模型侧工具：ask_user_question 转交问题，todo_write 维护任务列表。
+// billion-context 的四个上下文工具由已安装插件注册，执行时绑定
+// exec.agent.session.id；这里只精确放行，不放开 acp_* 或其他插件工具。
 const SAFE_EXACT = new Set([
   'ask_user_question',
   'todo_write',
+  'compress',
+  'decompress',
+  'search_context',
+  'acp_status',
 ])
 
 export function apply(ctx) {
