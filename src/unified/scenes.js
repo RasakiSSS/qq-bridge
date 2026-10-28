@@ -70,7 +70,8 @@ export class UnifiedScenes {
     return { key: row.current_scene, capability: id, generation: row.generation };
   }
   current() { const ctx = this.context(); return this.issue(ctx, this.active(ctx)); }
-  async join(key) {
+  async join(key, checkCaller = () => {}) {
+    checkCaller();
     sceneKey(key);
     const requested = this.context();
     return this.serial(async () => {
@@ -78,6 +79,7 @@ export class UnifiedScenes {
       if (before.account !== requested.account || before.ownerQQ !== requested.ownerQQ || before.identityEpoch !== requested.identityEpoch) throw fail('IDENTITY_CHANGED');
       this.requireVisible(key, before);
       await this.prepare(key, before);
+      checkCaller();
       const ctx = this.context();
       if (ctx.account !== before.account || ctx.ownerQQ !== before.ownerQQ || ctx.identityEpoch !== before.identityEpoch) throw fail('IDENTITY_CHANGED');
       this.requireVisible(key, ctx);
@@ -90,9 +92,11 @@ export class UnifiedScenes {
       return this.issue(ctx, row);
     });
   }
-  quit() {
+  quit(checkCaller = () => {}) {
+    checkCaller();
     const requested = this.context();
     return this.serial(() => {
+      checkCaller();
       const ctx = this.context();
       if (ctx.account !== requested.account || ctx.ownerQQ !== requested.ownerQQ || ctx.identityEpoch !== requested.identityEpoch) throw fail('IDENTITY_CHANGED');
       this.active(ctx);
