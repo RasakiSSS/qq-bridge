@@ -29,7 +29,7 @@ export class UnifiedStore {
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
       const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
       if ((id !== 0 && id !== APPLICATION_ID) || (id === 0 && (tables.length || version !== 0))
-          || (id === APPLICATION_ID && version !== 1)) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
+          || (id === APPLICATION_ID && ![1, 2].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;');
       if (id === 0) this.transaction(() => this.db.exec(`
         CREATE TABLE accounts (
@@ -75,6 +75,32 @@ export class UnifiedStore {
       this.db.prepare(`SELECT r.status,r.result,re.covered,s.preferences,de.seq FROM receipts r
         JOIN receipt_events re ON re.receipt=r.id JOIN scenes s ON s.account=r.account AND s.scene=r.scene
         JOIN dispatch_events de ON de.seq=re.seq LIMIT 0`).all();
+      // Additive migration: never reset existing inboxes, permissions or sessions.
+      if (version < 2) this.transaction(() => this.db.exec(`
+        CREATE TABLE session_bindings (
+          account TEXT PRIMARY KEY REFERENCES accounts(account), session_id TEXT NOT NULL UNIQUE,
+          workspace_id TEXT NOT NULL, preset TEXT NOT NULL,
+          create_attempted INTEGER NOT NULL DEFAULT 0 CHECK(create_attempted IN (0,1)),
+          status TEXT NOT NULL CHECK(status IN ('creating','bound')));
+        CREATE TABLE actions (
+          account TEXT NOT NULL REFERENCES accounts(account), session_id TEXT NOT NULL, call_id TEXT NOT NULL,
+          operation TEXT NOT NULL, target TEXT, fingerprint TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('preparing','dispatching','unknown','succeeded','rejected','deferred')),
+          result TEXT, created INTEGER NOT NULL,
+          PRIMARY KEY(account,session_id,call_id));
+        CREATE TABLE permission_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL REFERENCES accounts(account),
+          before_level TEXT NOT NULL, after_level TEXT NOT NULL, source TEXT NOT NULL,
+          at INTEGER NOT NULL);
+        CREATE TABLE runtime_owners (
+          account TEXT PRIMARY KEY REFERENCES accounts(account), owner_id TEXT,
+          pid INTEGER, host TEXT, generation INTEGER NOT NULL);
+        PRAGMA user_version=2;
+      `));
+      this.db.prepare('SELECT account,session_id,workspace_id,preset,status,create_attempted FROM session_bindings LIMIT 0').all();
+      this.db.prepare('SELECT account,session_id,call_id,operation,target,fingerprint,status,result,created FROM actions LIMIT 0').all();
+      this.db.prepare('SELECT account,before_level,after_level,source,at FROM permission_audit LIMIT 0').all();
+      this.db.prepare('SELECT account,owner_id,pid,host,generation FROM runtime_owners LIMIT 0').all();
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     } catch (error) { this.db.close(); throw error; }
   }

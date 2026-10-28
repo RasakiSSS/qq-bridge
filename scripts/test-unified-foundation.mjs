@@ -239,7 +239,7 @@ test('foreign/corrupt/newer databases fail closed without resetting them', (t) =
   const db = new DatabaseSync(foreign); db.exec('CREATE TABLE important(data TEXT);'); db.close();
   assert.throws(() => new UnifiedStore(foreign), { code: 'INVALID_STORE' });
   const newer = path.join(path.dirname(disk.file), 'newer.sqlite'); const s = new UnifiedStore(newer);
-  s.db.exec('PRAGMA user_version=2'); s.close();
+  s.db.exec('PRAGMA user_version=999'); s.close();
   assert.throws(() => new UnifiedStore(newer), { code: 'INVALID_STORE' });
 });
 

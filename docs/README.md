@@ -33,7 +33,7 @@
 | [UNIFIED_AGENT_REQUIREMENTS.md](UNIFIED_AGENT_REQUIREMENTS.md) | 单一主 Agent、聊天与空间场景切换、全局权限、未读和峰谷规则 | 需求定稿，分阶段实施中 |
 | [UNIFIED_AGENT_VALIDATION_PLAN.md](UNIFIED_AGENT_VALIDATION_PLAN.md) | 一致性审查结论与 P1 技术验证清单 | 目标清单；首轮结果见 P1 报告 |
 | [UNIFIED_AGENT_P1_REPORT.md](UNIFIED_AGENT_P1_REPORT.md) | 已安装 DSH 协议证据、隔离验证结果及统一主体模块设计 | P1 历史结果；最新进度见实施状态 |
-| [UNIFIED_AGENT_IMPLEMENTATION.md](UNIFIED_AGENT_IMPLEMENTATION.md) | 统一主体基础模块、测试结果和剩余接入工作 | 基础层及隔离 MCP 入口完成，未启用生产 |
+| [UNIFIED_AGENT_IMPLEMENTATION.md](UNIFIED_AGENT_IMPLEMENTATION.md) | 统一主体基础模块、测试结果和剩余接入工作 | DSH 适配、动作账本和运行组合已测，生产接线待完成 |
 | [design/GEN2_SIMULATION_PLAN.md](design/GEN2_SIMULATION_PLAN.md) | 二代仿真（`reserved2`）「一切皆工具」实施计划：WakeConfig 唤醒调度、MCP 工具集、控制台参数、`qq-chat-v2` preset | ⚠️ 骨架/API/调度/MCP/UI 均已落地，文中「状态：实施中」与残留 TODO 以当前代码为准 |
 | [design/SOCIAL_MODE_PLAN.md](design/SOCIAL_MODE_PLAN.md) | 一代仿真模式（`reserved`）的头脑风暴定案：规则引擎管「何时说」、LLM 管「说什么」 | ⚠️ 描述的一代状态机已实现；`reserved2` 已是默认模式，设计背景仍有效 |
 | [design/DSH_QQ_TOOLS_PLAN.md](design/DSH_QQ_TOOLS_PLAN.md) | 「一切皆工具」总路线与交接文档：当前能力盘点、安全性设计、分阶段计划 | ⚠️ 阶段计划大部分已完成，作为路线/安全设计参考仍有效 |
