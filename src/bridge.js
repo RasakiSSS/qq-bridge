@@ -1552,6 +1552,7 @@ async function main() {
 
   function initQzone() {
     qzoneAgent = createQzoneAgent({ api, ensureWorkspace: ensureChatWorkspace,
+      file: path.join(STATE_DIR, 'qzone-session.json'), log,
       resolvePreset: () => resolvePresetName('qq-qzone', { strict: true }),
       ensureModel: ensureChatModel, assertAllowed: () => assertQzoneAllowed(null, 'model'), role: currentRoleHintV2 });
     qzoneService = createQzoneService({ file: path.join(STATE_DIR, 'qzone.json'),
@@ -9504,7 +9505,8 @@ async function main() {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
       const errText = `${accepted.result.error.code}: ${accepted.result.error.message}`;
       const safeErrText = shouldAuditKey(key) && SENSITIVE_RE.test(errText) ? '（含敏感信息，已隐藏）' : errText;
-      if (!opts.silent) await sendToQQ(key, `⚠️ 消息未被接受：${safeErrText}`);
+      log(`⚠️ 消息未被接受 (${key})：${safeErrText}`);
+      appendActivity(`${key} 消息未被接受：${safeErrText.slice(0, 80)}`);
       return { ok: false, error: safeErrText };
     }
     if (wakeState && isCurrentSession(key, sessionId)
@@ -11375,7 +11377,8 @@ async function main() {
     if (!accepted.result.ok) {
       const errText = `${accepted.result.error.code}: ${accepted.result.error.message}`;
       const safeErrText = shouldAuditKey(key) && SENSITIVE_RE.test(errText) ? '（含敏感信息，已隐藏）' : errText;
-      await sendToQQ(key, `⚠️ 消息未被接受：${safeErrText}`);
+      log(`⚠️ 消息未被接受 (${key})：${safeErrText}`);
+      appendActivity(`${key} 消息未被接受：${safeErrText.slice(0, 80)}`);
       return;
     }
     if (accepted.result.value.command) {
@@ -11596,6 +11599,7 @@ async function main() {
           if (frame.type === 'session/snapshot') {
             recordSessionSnapshot(frame.sessionId, frame.snapshot);
             memoryWorker?.onSnapshot(frame.sessionId, frame.snapshot);
+            qzoneAgent?.onSnapshot(frame.sessionId, frame.snapshot);
             continue;
           }
           if (frame.type === 'session/event') {
@@ -11915,10 +11919,9 @@ async function main() {
               } else if (ended.reason.kind === 'error') {
                 const msg = ended.reason.error?.message ?? '未知错误';
                 const safeMsg = shouldAuditKey(key) && SENSITIVE_RE.test(msg) ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
-                // 以前这里只发 QQ、不写日志：出问题时 bridge.log 里什么都没有，排查只能靠猜（PR #24）。
+                // Infrastructure diagnostics stay in bridge logs/console, never QQ chats.
                 log(`⚠️ agent 处理出错 (${key})：${safeMsg}`);
                 appendActivity(`${key} agent 处理出错：${safeMsg.slice(0, 80)}`);
-                await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
                 if (isFarewell) {
                   const st = socialState(key);
                   if (st.phase === 'exiting') {

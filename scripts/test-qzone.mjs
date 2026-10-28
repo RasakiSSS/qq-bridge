@@ -306,7 +306,7 @@ test('DSH explicit queue rejection allows retry; transport uncertainty does not 
 test('DSH account switch isolates sessions within the shared workspace; failed model selection sends no prompt', async () => {
   const created = [], prompts = []; let worker, selected = 'applied';
   const ok = (value) => ({ result: { ok: true, value } });
-  const api = { events: { follow() {} }, sessions: {
+  const api = { workspace: { archiveSession: async () => ok({}) }, events: { follow() {} }, sessions: {
       create: async (params) => { created.push(params); return ok({ sessionId: 's-' + created.length }); },
       prompt: async ({ sessionId }) => {
         prompts.push(sessionId);

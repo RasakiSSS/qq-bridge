@@ -84,7 +84,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       archiveSession: async ({ sessionId }) => { calls.archived.push(sessionId); return success({}); },
     },
     sessions: {
-      create: async (params) => { calls.created.push(params); return success({ sessionId: `fixture-${calls.created.length}` }); },
+      create: async (params) => { calls.created.push(params); return success({ sessionId: params.sessionId || `fixture-${calls.created.length}` }); },
       selectModel: async () => success({ selected: { provider: 'fixture', model: 'fixture' } }),
       prompt: async (params) => { calls.prompts.push(params); return success({}); },
     },
