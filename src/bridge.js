@@ -1545,9 +1545,14 @@ async function main() {
   let slangTaskChain = Promise.resolve();
   let qzoneService = null;
   let qzoneAgent = null;
+  const unifiedQzoneCollection = { get accountQQ() { return selfUserId; } };
+  const unifiedQzoneActions = new WeakSet();
+  let unifiedQzoneClosing = false, unifiedQzonePoll = null;
+  let pollUnifiedQzone = () => Promise.resolve();
 
   function assertQzoneAllowed(context, action) {
-    if (unifiedConfigured) throw new Error('统一模式不使用旧空间会话入口');
+    if (unifiedConfigured && (unifiedQzoneClosing || !(context === unifiedQzoneCollection && action === 'read')
+      && !(context && unifiedQzoneActions.has(context)))) throw new Error('统一模式不使用旧空间会话入口');
     if (readJsonSafe(path.join(ROOT, 'config.json'), {}).socialV2?.qzone?.enabled !== true) {
       throw Object.assign(new Error('QQ 空间功能已关闭'), { statusCode: 403 });
     }
@@ -1556,15 +1561,19 @@ async function main() {
     if (currentMode !== 'reserved2') deny('空间功能仅在二代仿真模式可用，请在控制台切换到二代仿真');
     if (cfg.socialV2?.enabled === false) deny('二代仿真已关闭（socialV2.enabled=false），请在配置中启用');
     if (readRoleState().mode === 'silent') deny('当前处于角色静默模式（silent），空间活动已停止；管理员发送 /active 或在控制台关闭静默后恢复');
-    if (context) context.authorize();
+    if (context && context !== unifiedQzoneCollection) context.authorize();
     const flag = ({ publish: 'qzonePublish', reply: 'qzoneComment', comment: 'qzoneComment' })[action] || 'qzoneRead';
     if (!v2ToolEnabled(flag)) throw Object.assign(new Error('空间工具已关闭'), { statusCode: 403 });
+    if (unifiedConfigured) {
+      if (!selfUserId || unifiedLoginPending || !snowlumaHealth.connected) deny('空间采集等待 QQ 身份连接恢复');
+      return; // Read-only collection may retain events during peak/DSH outages.
+    }
     if (peakSleepBlocksV2(context?.key)) throw Object.assign(new Error('梁文峰：空间自主活动休眠'), { statusCode: 403 });
     if (!context && !dshReady) throw Object.assign(new Error('DSH 暂未就绪'), { statusCode: 503 });
   }
 
   function initQzone() {
-    qzoneAgent = createQzoneAgent({ api, ensureWorkspace: ensureChatWorkspace,
+    if (!unifiedConfigured) qzoneAgent = createQzoneAgent({ api, ensureWorkspace: ensureChatWorkspace,
       file: path.join(STATE_DIR, 'qzone-session.json'), log,
       resolvePreset: () => resolvePresetName('qq-qzone', { strict: true }),
       ensureModel: ensureChatModel, assertAllowed: () => assertQzoneAllowed(null, 'model'), role: currentRoleHintV2 });
@@ -1585,7 +1594,38 @@ async function main() {
         people: [...input.pendingFeeds.map((p) => p.authorQQ), ...input.comments.map((c) => c.authorQQ)].filter((p) => p !== input.accountQQ),
         query: input.pendingFeeds.map((p) => p.content).join(' ').slice(0, 300), automatic: true, maxChars: memoryConfig().promptMaxChars,
       })) : null }), log });
-    if (readJsonSafe(path.join(ROOT, 'config.json'), {}).socialV2?.qzone?.enabled === true) log('[qzone] QQ 空间自主活动已启用（好友动态、发说说、评论与 @ 轮询）');
+    if (readJsonSafe(path.join(ROOT, 'config.json'), {}).socialV2?.qzone?.enabled === true) log(unifiedConfigured
+      ? '[qzone] 统一模式空间通知采集已启用，不启动独立模型会话'
+      : '[qzone] QQ 空间自主活动已启用（好友动态、发说说、评论与 @ 轮询）');
+  }
+
+  function unifiedQzoneHandler(method) {
+    return {
+      scope: 'scene', level: 'v1',
+      prepare: ({ target, payload }) => {
+        if (target !== 'qzone') throw Object.assign(new Error('空间动作需要进入空间场景'), { code: 'SCENE_DENIED' });
+        return payload;
+      },
+      dispatch: async ({ account, payload, assertCurrent }) => {
+        const context = { key: 'qzone', accountQQ: account, authorize: () => {
+          assertCurrent();
+          if (selfUserId !== account) throw Object.assign(new Error('空间账号已变化'), { code: 'IDENTITY_CHANGED' });
+        } };
+        unifiedQzoneActions.add(context);
+        try {
+          context.authorize();
+          const args = method === 'publish' ? [payload.content, context, payload.mentions]
+            : [method === 'reply' ? payload.commentKey : payload.postKey, payload.content, context, payload.mentions];
+          const result = await qzoneService[method](...args);
+          return result?.ok === true && result.status === 'sent' ? { status: 'succeeded', result } : { status: 'unknown' };
+        } catch (error) {
+          // The service converts all failures after actual dispatch to 502/
+          // uncertain. Only these explicit pre-write policy failures are final.
+          if ([400, 403, 404, 409, 429].includes(error.statusCode)) return { status: 'rejected', result: { code: 'QZONE_POLICY_REJECTED', statusCode: error.statusCode } };
+          throw error;
+        } finally { unifiedQzoneActions.delete(context); }
+      },
+    };
   }
 
   // ── 表情包体系（二代仿真）本地知识库 ────────────────────────────────────
@@ -12160,7 +12200,8 @@ async function main() {
     const content = typeof event.message === 'string' ? event.message : await segmentsToText(event.message || [], { includeReply: false });
     const quotedSelf = Array.isArray(event.message) && await isQuoteTargetSelf(event.message, kind, key.split(':')[1], event.self_id);
     const st = getSocialV2State(key);
-    const reason = evaluateWakeTriggerV2(key, st, event, kind, content, content, quotedSelf);
+    const wakeConfig = await unifiedDriver.wakeConfig(key);
+    const reason = evaluateWakeTriggerV2(key, { ...st, wakeConfig }, event, kind, content, content, quotedSelf);
     const sourceId = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '')
       || crypto.createHash('sha256').update(JSON.stringify([event.self_id, key, event.user_id, event.time, event.message])).digest('hex');
     const payload = {
@@ -12208,8 +12249,11 @@ async function main() {
           runtimeOptions: {
             file: path.join(STATE_DIR, 'unified.sqlite'), workspaceId: unifiedWorkspaceId, api,
             getContext: () => { if (selfUserId !== account) throw new Error('统一模式账号已变化，请完成交接后重启'); return unifiedContext(); },
-            isAllowed: key => key !== 'qzone' && isSessionAllowedInCurrentMode(key),
+            isAllowed: key => key === 'qzone' ? cfg.socialV2?.qzone?.enabled === true && v2ToolEnabled('qzoneRead') : isSessionAllowedInCurrentMode(key),
             isWakeAllowed: row => !shouldBlockSilentReply(row.scene),
+            initialWakeConfig: key => getSocialV2State(key).wakeConfig,
+            toolAllowed: name => v2ToolEnabled(name),
+            sleepBounds: () => cfg.socialV2?.wake || {},
             configureModel: async ({ sessionId }) => (await ensureChatModel(sessionId)) === 'applied',
             beforeSession: async () => {
               if (!dshPresetIds.includes('qq-unified')) throw new Error('DSH 尚未安装统一主预设');
@@ -12220,20 +12264,40 @@ async function main() {
             },
             authenticateQQ: (connection, event) => connection === bot && snowlumaHealth.connected && String(event.self_id) === account,
             authenticateConsole: request => unifiedConsoleRequests.has(request),
-            handlers: { sendMessage: sender },
+            handlers: { sendMessage: sender, qzonePublish: unifiedQzoneHandler('publish'),
+              qzoneComment: unifiedQzoneHandler('comment'), qzoneReply: unifiedQzoneHandler('reply') },
           },
         });
       },
     });
-    closeUnifiedOnShutdown = () => unifiedDriver.close();
+    closeUnifiedOnShutdown = async () => {
+      unifiedQzoneClosing = true;
+      const drained = await Promise.allSettled([unifiedDriver.close(), unifiedQzonePoll]);
+      if (drained[0].status === 'rejected') throw drained[0].reason;
+    };
     unifiedDriver.start();
-    log('[unified] 统一模式开发入口已选择，旧自动投递停止；未迁移历史，空间与文件等能力尚未接通');
+    log('[unified] 统一模式开发入口已选择，旧自动投递停止；未迁移历史，文件与好友等能力尚未接通');
   }
   peakSleepTickV2();
   setInterval(peakSleepTickV2, 1000).unref?.();
+  initQzone();
   if (!unifiedConfigured) {
-    initQzone();
     setInterval(() => { void qzoneService.run(); }, 30000).unref?.();
+  } else {
+    let collectionErrorNoted = false;
+    pollUnifiedQzone = () => {
+      if (unifiedQzoneClosing || unifiedQzonePoll) return unifiedQzonePoll;
+      unifiedQzonePoll = qzoneService.collect(unifiedQzoneCollection, async input => {
+        if (unifiedQzoneClosing || input.accountQQ !== selfUserId || unifiedLoginPending || !snowlumaHealth.connected) throw new Error('空间账号连接已变化');
+        const { accountQQ, sourceId, ...event } = input;
+        await unifiedDriver.ingest({ ...event, key: 'qzone', sourceId: crypto.createHash('sha256').update(sourceId).digest('hex') });
+      }).then(result => { collectionErrorNoted = false; return result; }).catch(() => {
+        if (!collectionErrorNoted && !unifiedQzoneClosing) log('[unified] 空间采集暂不可用，原记录保留；不会启动独立空间会话');
+        collectionErrorNoted = true;
+      }).finally(() => { unifiedQzonePoll = null; });
+      return unifiedQzonePoll;
+    };
+    setInterval(() => { void pollUnifiedQzone(); }, 30000).unref?.();
   }
   memoryWorker = createMemoryWorker({ api, memory: sharedMemory, getConfig: memoryConfig, getAccount: () => selfUserId,
     ensureWorkspace: ensureChatWorkspace, resolvePreset: () => resolvePresetName('qq-memory', { strict: true }), ensureModel: ensureChatModel,

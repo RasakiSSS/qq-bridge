@@ -59,6 +59,47 @@ test('default disabled; selected publishing defaults and valid decision formats'
   assert.throws(() => parseQzoneDecision('{"post":null,"replies":[{}]}'));
 });
 
+test('unified collection never calls a model or sends QQ, keeps own feeds read and comments unacknowledged', async t => {
+  const f = fixture(t), delivered = [];
+  f.feeds.push({ uin: 1, key: 'own', appid: 311, time: f.now() / 1000, html: 'my post' });
+  f.addComment('new');
+  await f.service.collect(null, async event => delivered.push(event));
+  assert.deepEqual(delivered.map(e => [e.kind, e.wake]), [['qzone-feed', false], ['qzone-comment', true]]);
+  assert.equal(f.decisions.length, 0); assert.equal(f.calls.some(c => /^(send|comment)_/.test(c.action)), false);
+  const state = JSON.parse(fs.readFileSync(f.opts.file));
+  assert.equal(state.accounts['1'].nextPollAt, 0);
+  assert.equal(Object.values(state.accounts['1'].comments)[0].status, 'new');
+  assert.ok(state.accounts['1'].seenFeeds.includes('post:1:own'));
+  await f.service.collect(null, async () => assert.fail('not yet due'));
+});
+
+test('collector retries stable source keys after delivery failure and restart, without losing comments beyond old snapshot page', async t => {
+  const f = fixture(t), seen = new Set();
+  for (let i = 0; i < 65; i++) f.addComment('comment-' + i);
+  let count = 0;
+  await assert.rejects(f.service.collect(null, async e => { seen.add(e.sourceId); if (++count === 30) throw Error('inbox unavailable'); }));
+  const restored = createQzoneService(f.opts);
+  await restored.collect(null, async e => seen.add(e.sourceId));
+  assert.equal(seen.size, 66); assert.equal(f.decisions.length, 0);
+  const state = JSON.parse(fs.readFileSync(f.opts.file));
+  assert.equal(Object.values(state.accounts['1'].comments).filter(c => c.status === 'new').length, 65);
+});
+
+test('collector emits mention wake even with automatic ordinary comment replies disabled', async t => {
+  const f = fixture(t, { autoReplyComments: false }), events = [];
+  f.feeds[0].html = '@{uin:1,nick:bot}';
+  f.addComment('normal'); f.addComment('mention', { content: '@{uin:1,nick:bot}' });
+  await f.service.collect(null, async e => events.push(e));
+  assert.deepEqual(events.map(e => e.wake), [true, false, true]);
+});
+
+test('collector stops when paused mid-delivery and never advances next poll after partial failure', async t => {
+  const f = fixture(t); f.addComment('comment');
+  await assert.rejects(f.service.collect(null, async () => f.block(true)), /paused/);
+  const state = JSON.parse(fs.readFileSync(f.opts.file));
+  assert.equal(state.accounts['1'].nextEventAt, 0); assert.equal(f.decisions.length, 0);
+});
+
 test('space and chats share evidence; memory failure cannot turn successful publication into a retry', async (t) => {
   const f = fixture(t);
   const memory = createSharedMemory({ file: path.join(f.dir, 'memory.sqlite'), now: f.now });

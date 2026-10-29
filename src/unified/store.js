@@ -29,7 +29,7 @@ export class UnifiedStore {
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
       const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
       if ((id !== 0 && id !== APPLICATION_ID) || (id === 0 && (tables.length || version !== 0))
-          || (id === APPLICATION_ID && ![1, 2].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
+          || (id === APPLICATION_ID && ![1, 2, 3].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;');
       if (id === 0) this.transaction(() => this.db.exec(`
         CREATE TABLE accounts (
@@ -101,6 +101,18 @@ export class UnifiedStore {
       this.db.prepare('SELECT account,session_id,call_id,operation,target,fingerprint,status,result,created FROM actions LIMIT 0').all();
       this.db.prepare('SELECT account,before_level,after_level,source,at FROM permission_audit LIMIT 0').all();
       this.db.prepare('SELECT account,owner_id,pid,host,generation FROM runtime_owners LIMIT 0').all();
+      if (version < 3) this.transaction(() => this.db.exec(`
+        CREATE TABLE attention_waits (
+          account TEXT PRIMARY KEY REFERENCES accounts(account), since_seq INTEGER NOT NULL,
+          started INTEGER NOT NULL);
+        CREATE TABLE wake_timers (
+          account TEXT NOT NULL, scene TEXT NOT NULL, token TEXT NOT NULL, due_at INTEGER NOT NULL,
+          event_seq INTEGER REFERENCES events(seq),
+          PRIMARY KEY(account,scene), FOREIGN KEY(account,scene) REFERENCES scenes(account,scene));
+        PRAGMA user_version=3;
+      `));
+      this.db.prepare('SELECT account,since_seq,started FROM attention_waits LIMIT 0').all();
+      this.db.prepare('SELECT account,scene,token,due_at,event_seq FROM wake_timers LIMIT 0').all();
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     } catch (error) { this.db.close(); throw error; }
   }
@@ -191,6 +203,7 @@ export class UnifiedStore {
       this.db.prepare('UPDATE dispatches SET status=? WHERE id=?').run(outcome, id);
       this.db.prepare('UPDATE accounts SET failures=0,retry_at=0 WHERE account=?').run(row.account);
       this.db.prepare('UPDATE events SET notified=1 WHERE seq IN (SELECT seq FROM dispatch_events WHERE dispatch=?)').run(id);
+      if (row.status !== 'accepted') this.db.prepare('DELETE FROM attention_waits WHERE account=? AND started<=?').run(row.account, row.created);
       return this.dispatch(id);
     });
   }

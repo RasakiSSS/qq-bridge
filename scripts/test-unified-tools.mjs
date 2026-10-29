@@ -53,6 +53,16 @@ test('revocation during asynchronous join blocks mutation and queued calls', asy
   assert.equal(f.store.account('100').current_scene, null);
 });
 
+test('host tool switches are rechecked after a call has waited in the queue', async t => {
+  const gate = deferred(), entered = deferred();
+  const f = fixture(t, async () => { entered.resolve(); await gate.promise; });
+  let enabled = true; f.tools.toolAllowed = flag => flag !== 'markRead' || enabled;
+  const join = f.call('qq_join_session', { key: 'group:1' });
+  const queued = f.call('qq_mark_read', { receipt: 'not-delivered' });
+  const rejection = assert.rejects(queued, { code: 'TOOL_DENIED' });
+  await entered.promise; enabled = false; gate.resolve(); await join; await rejection;
+});
+
 test('MCP facade preserves snapshot unread, scene capability and pause rules', async t => {
   const f = fixture(t);
   const append = id => f.store.append({ account: '100', scene: 'group:1', sourceId: id, payload: { text: id }, at: 1 });
@@ -84,7 +94,7 @@ test('real MCP list/call transport exposes only registered tools, keeps credenti
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(a); await client.connect(b);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 7);
+  assert.equal(list.tools.length, 13);
   assert.ok(!JSON.stringify(list).includes(f.token));
   assert.ok(!JSON.stringify(list).includes('ownerQQ'));
   const joined = await client.callTool({ name: 'qq_join_session', arguments: { key: 'group:1' } });

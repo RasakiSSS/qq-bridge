@@ -50,6 +50,23 @@ test('composed runtime keeps one main session across scene switches and serial t
   assert.ok(!JSON.stringify(f.prompts).includes(f.token));
   assert.equal(f.runtime.store.counts('100').reduce((sum, row) => sum + row.unread, 0), 3);
 });
+
+test('durable finite wake resumes the same main session after yield and turn end', async t => {
+  const f = fixture(t); f.add('group:1', 'initial'); await f.runtime.tick();
+  const call = (name, args, callId = 'wake') => f.runtime.tools.call(f.token, name, args, { sessionId: f.sid, callId });
+  const cap = await call('qq_join_session', { key: 'group:1' });
+  const read = await call('qq_get_unread_msg', { capability: cap.capability }); await call('qq_mark_read', { receipt: read.receipt });
+  await call('qq_set_wake_config', { capability: cap.capability, config: { infinite: false, sleepMs: 1000 } });
+  assert.equal((await call('qq_wait_for_events')).status, 'yield');
+  await f.end(f.prompts[0]);
+  assert.equal(f.runtime.store.db.prepare('SELECT COUNT(*) AS n FROM attention_waits').get().n, 1);
+  assert.equal((await f.runtime.tick()).status, 'idle'); f.advance(1000);
+  assert.equal((await f.runtime.tick()).status, 'accepted');
+  assert.equal(f.creates.length, 1); assert.equal(f.prompts.length, 2);
+  assert.equal(JSON.parse(f.prompts[1].content[0].text).messages[0].kind, 'wake-timer');
+  assert.equal(f.runtime.store.db.prepare('SELECT COUNT(*) AS n FROM attention_waits').get().n, 0);
+  assert.equal(f.runtime.scenes.current().key, 'group:1');
+});
 test('peak holds normal unread but delivers owner private; later valley recovers the original unread', async t => {
   const f = fixture(t); f.ctx.peakEnabled = true;
   f.add('group:1', 'a'); assert.equal((await f.runtime.tick()).status, 'idle');

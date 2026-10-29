@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { startUnifiedHost } from '../src/unified/host.js';
 import { createUnifiedBridgeDriver, assertLegacySessionsIdle } from '../src/unified/bridge-driver.js';
@@ -136,4 +137,101 @@ test('real console authentication gates permission API, rejects old MCP and prot
     for (const url of ['/api/session/reset', '/api/workspace/reset', '/api/socialV2/reset']) assert.equal((await request(url)).status, 409);
     assert.equal(h.calls.archived.length, 0); assert.equal(h.calls.cancelled.length, 0);
   } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('unified MCP wake preferences feed actual bridge trigger evaluation without mutating legacy preferences', async t => {
+  const h = await fixture(t); await h.receive(); await h.unifiedDriver.tick();
+  const current = JSON.parse((await h.call('qq_join_session', { key: 'group:456' })).text);
+  const config = { mode: 'diving', infinite: true, triggers: { anyMessage: false, probability: 0,
+    atMention: false, nameMention: false, question: false, keywords: ['unified-trigger'], speakerIds: [] } };
+  const changed = JSON.parse((await h.call('qq_set_wake_config', { capability: current.capability, config }, 'configure')).text);
+  assert.equal(changed.status, 'succeeded');
+  await h.receive('group:456', 2, 'ordinary conversation');
+  await h.receive('group:456', 3, 'unified-trigger');
+  const db = new DatabaseSync(path.join(h.temp, 'state/unified.sqlite'), { readOnly: true });
+  try {
+    const rows = db.prepare("SELECT payload,wake,unread FROM events WHERE scene='group:456' ORDER BY seq").all();
+    assert.deepEqual(rows.map(row => [row.wake, row.unread]), [[0, 1], [1, 1]]);
+    assert.equal(JSON.parse(rows[1].payload).reason, 'keyword:unified-trigger');
+  } finally { db.close(); }
+  const read = JSON.parse((await h.call('qq_wait_for_messages', { capability: current.capability, quietMs: 0 })).text);
+  assert.equal(read.page.messages.length, 2);
+  assert.equal(read.page.remaining, 0);
+  // Updating unified preferences does not overwrite the old fallback state.
+  assert.ok(!JSON.stringify(h.getSocialV2State('group:456').wakeConfig).includes('unified-trigger'));
+});
+
+test('unified Qzone collection enters durable main inbox without standalone session or empty-poll prompts', async t => {
+  const h = await fixture(t, { qzone: { enabled: true } });
+  let mentioned = false;
+  h.bot.request = async action => {
+    if (action === 'get_login_info') return { status: 'ok', retcode: 0, data: { user_id: 100 } };
+    if (action === 'get_qzone_feeds') return { status: 'ok', retcode: 0, data: { feeds: [
+      { uin: 999, key: 'post', appid: 311, html: mentioned ? '@{uin:100,nick:bot}' : 'ordinary post', time: Math.floor(Date.now() / 1000) },
+    ] } };
+    if (action === 'get_qzone_msg_list') return { status: 'ok', retcode: 0, data: { msglist: [] } };
+    if (action === 'get_qzone_msg_detail') return { status: 'ok', retcode: 0, data: { tid: 'post', comments: [], comment_num: 0 } };
+    assert.fail('unexpected QQ write or request ' + action);
+  };
+  assert.equal(h.qzoneAgent, null);
+  h.setReady(false); // Collection is independent of DSH availability.
+  assert.equal((await h.pollUnifiedQzone()).status, 'collected');
+  h.setReady(true); assert.equal((await h.unifiedDriver.tick()).status, 'idle');
+  assert.equal(h.calls.created.length, 0);
+  // Ordinary feeds are available when the main session is woken elsewhere.
+  await h.receive(); await h.unifiedDriver.tick();
+  const cap = JSON.parse((await h.call('qq_join_session', { key: 'qzone' })).text);
+  const page = JSON.parse((await h.call('qq_get_unread_msg', { capability: cap.capability })).text);
+  assert.equal(page.messages[0].payload.text, 'ordinary post');
+  assert.equal(h.calls.created.length, 1);
+  await assert.rejects(Promise.resolve().then(() => h.assertQzoneAllowed(null, 'model')), /统一模式/);
+});
+
+test('main Qzone actions preserve friends visibility, limit, mentions, exact call dedupe and scene isolation', async t => {
+  const h = await fixture(t, { qzone: { enabled: true, dailyPostLimit: 1, minPostIntervalMs: 0, visibility: 'friends' } });
+  const writes = []; let login = 100;
+  h.bot.request = async (action, params) => {
+    let data;
+    if (action === 'get_login_info') data = { user_id: login };
+    else if (action === 'get_qzone_feeds') data = { feeds: [{ uin: 999, key: 'post', appid: 311, nickname: 'friend', html: 'post', time: Date.now() / 1000 }] };
+    else if (action === 'get_qzone_msg_list') data = { msglist: [{ tid: 'own', content: 'own', time: Date.now() / 1000, comment_num: 1 }] };
+    else if (action === 'get_qzone_msg_detail') data = { tid: params.tid, comment_num: 1, comments: [{ comment_id: 'c1', uin: 999, name: 'friend', content: 'hello', time: Date.now() / 1000 }] };
+    else if (action === 'send_qzone_msg') { writes.push({ action, params }); data = { tid: 'new' }; }
+    else if (action === 'comment_qzone') { writes.push({ action, params }); data = { comment_id: 'sent' }; }
+    else assert.fail(action);
+    return { status: 'ok', retcode: 0, data };
+  };
+  await h.pollUnifiedQzone(); await h.unifiedDriver.tick();
+  const chat = JSON.parse((await h.call('qq_join_session', { key: 'group:456' })).text);
+  assert.equal((await h.call('qq_qzone_publish', { capability: chat.capability, content: 'wrong scene' }, 'wrong')).error, true);
+  const cap = JSON.parse((await h.call('qq_join_session', { key: 'qzone' })).text);
+  const publish = { capability: cap.capability, content: 'hello', mentions: ['999'] };
+  const sent = JSON.parse((await h.call('qq_qzone_publish', publish, 'post')).text);
+  assert.equal(sent.status, 'succeeded');
+  assert.deepEqual(JSON.parse((await h.call('qq_qzone_publish', publish, 'post')).text), sent);
+  assert.equal(writes[0].params.ugc_right, 4); assert.match(writes[0].params.content, /uin:999/);
+  assert.equal(JSON.parse((await h.call('qq_qzone_publish', { ...publish, content: 'second' }, 'second')).text).status, 'rejected');
+  const page = JSON.parse((await h.call('qq_get_unread_msg', { capability: cap.capability })).text);
+  const comment = page.messages.find(row => row.payload.commentId === 'c1' && row.payload.ownerQQ === '100');
+  assert.equal(JSON.parse((await h.call('qq_qzone_reply', { capability: cap.capability, content: 'thanks', commentKey: comment.payload.key }, 'reply')).text).status, 'succeeded');
+  assert.equal(JSON.parse((await h.call('qq_qzone_comment', { capability: cap.capability, content: 'nice', postKey: 'post:999:post' }, 'comment')).text).status, 'succeeded');
+  assert.equal(writes.length, 3);
+  login = 101;
+  assert.equal(JSON.parse((await h.call('qq_qzone_publish', { ...publish, content: 'changed account' }, 'account')).text).status, 'rejected');
+  assert.equal(writes.length, 3);
+});
+
+test('Qzone uncertain network write remains unknown and is never retried under same tool call', async t => {
+  const h = await fixture(t, { qzone: { enabled: true } }); await h.receive(); await h.unifiedDriver.tick();
+  let writes = 0;
+  h.bot.request = async action => {
+    if (action === 'get_login_info') return { status: 'ok', retcode: 0, data: { user_id: 100 } };
+    if (action === 'send_qzone_msg') { writes++; throw Error('network lost'); }
+    assert.fail(action);
+  };
+  const cap = JSON.parse((await h.call('qq_join_session', { key: 'qzone' })).text);
+  const args = { capability: cap.capability, content: 'one attempt' };
+  assert.equal(JSON.parse((await h.call('qq_qzone_publish', args, 'lost')).text).status, 'unknown');
+  assert.equal(JSON.parse((await h.call('qq_qzone_publish', args, 'lost')).text).status, 'unknown');
+  assert.equal(writes, 1);
 });

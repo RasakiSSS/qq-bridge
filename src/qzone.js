@@ -123,6 +123,7 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
     check(context, 'read');
     const qq = id(login?.user_id);
     if (!qq) throw fail('无法确认当前 QQ 账号', 502);
+    if (context?.accountQQ != null && qq !== String(context.accountQQ)) throw fail('QQ 账号已切换，本次空间操作已取消', 409);
     activeAccount = qq;
     if (!state.accounts[qq]) {
       state.accounts[qq] = { startedAt: enabledSince ?? now(), nextPollAt: 0, nextEventAt: 0, ownPosts: [], seenFeeds: [], pendingFeeds: [], comments: {}, writes: [], commentCursors: {}, knownPosts: {} };
@@ -396,8 +397,49 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
       log('[qzone] 本轮空间任务未完成：' + (error.statusCode ? error.message : '模型或连接暂不可用'));
     } finally { polling = false; }
   }
+  // Unified mode uses collection only. This path never calls decide, performs
+  // writes to QQ, marks comments read, or advances the autonomous model timer.
+  // Delivery must persist before resolving; retries offer the same source keys.
+  async function collect(context, deliver) {
+    if (typeof deliver !== 'function') throw fail('空间事件投递器未配置');
+    if (!enabled() || polling || now() < retryAt || readOnly) return { status: 'idle' };
+    check(context, 'read'); polling = true;
+    try {
+      return await serial(async () => {
+        const { qq, data: a } = await account(context);
+        if (now() < (a.nextEventAt || 0)) return { status: 'idle' };
+        await browse(qq, a, context);
+        await confirmAccount(qq, context, 'read');
+        let delivered = 0;
+        const eventTime = value => Number.isSafeInteger(value) && value > 0 ? value : now();
+        for (const feed of a.pendingFeeds) {
+          check(context, 'read');
+          if (feed.authorQQ === qq) continue;
+          await deliver({ accountQQ: qq, sourceId: feed.key, kind: 'qzone-feed',
+            payload: { ...feed, text: feed.content }, at: eventTime(Number(feed.time) * 1000), wake: feed.mentioned === true });
+          delivered++;
+        }
+        for (const comment of Object.values(a.comments)) {
+          if (comment.status !== 'new' || !(comment.ownerQQ === qq || comment.mentioned
+            || a.writes.some(w => w.kind === 'comment' && w.tid === comment.tid && w.ownerQQ === comment.ownerQQ && w.status === 'sent'))) continue;
+          check(context, 'read');
+          await deliver({ accountQQ: qq, sourceId: comment.key, kind: 'qzone-comment',
+            payload: { ...comment, text: comment.content }, at: eventTime(Number(comment.time)),
+            wake: comment.mentioned === true || cfg().autoReplyComments });
+          delivered++;
+        }
+        check(context, 'read');
+        a.nextEventAt = now() + cfg().eventPollIntervalMs; save();
+        return { status: 'collected', events: delivered };
+      });
+    } catch (error) {
+      retryAt = now() + 60000;
+      throw error;
+    } finally { polling = false; }
+  }
   return {
     run,
+    collect,
     status: (context) => serial(async () => { const { qq, data } = await account(context); return snapshot(qq, data); }),
     browse: (context) => serial(async () => { const { qq, data } = await account(context); return browse(qq, data, context); }),
     publish: (text, context, mentions) => serial(async () => { const { qq, data } = await account(context); return publish(qq, data, text, context, mentions); }),

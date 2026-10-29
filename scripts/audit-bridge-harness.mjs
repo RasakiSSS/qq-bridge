@@ -138,7 +138,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
-    unifiedDriver, handleUnifiedIncoming, unifiedContext,
+    unifiedDriver, handleUnifiedIncoming, unifiedContext, pollUnifiedQzone,
     setConnected(value) { snowlumaHealth.connected = value; },
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,

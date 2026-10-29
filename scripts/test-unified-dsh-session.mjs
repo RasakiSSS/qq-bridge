@@ -243,11 +243,11 @@ test('schema 1 migration preserves messages, permission, pause and scene', t => 
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   let store = new UnifiedStore(file);
   store.append({ account: '100', scene: 'group:1', sourceId: 'm1', payload: { text: 'keep' } });
-  store.db.exec("UPDATE accounts SET permission='v1',paused=1,current_scene='group:1'; DROP TABLE session_bindings; DROP TABLE actions; DROP TABLE permission_audit; DROP TABLE runtime_owners; PRAGMA user_version=1;");
+  store.db.exec("UPDATE accounts SET permission='v1',paused=1,current_scene='group:1'; DROP TABLE attention_waits; DROP TABLE wake_timers; DROP TABLE session_bindings; DROP TABLE actions; DROP TABLE permission_audit; DROP TABLE runtime_owners; PRAGMA user_version=1;");
   store.close(); store = new UnifiedStore(file);
   try {
     assert.equal(store.account('100').permission, 'v1'); assert.equal(store.account('100').paused, 1);
     assert.equal(store.account('100').current_scene, 'group:1'); assert.equal(store.counts('100')[0].unread, 1);
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
   } finally { store.close(); }
 });

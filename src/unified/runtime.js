@@ -6,6 +6,7 @@ import { UnifiedDshSession, UnifiedDshEvidence, recoverDshDispatch } from './dsh
 import { UnifiedActions } from './actions.js';
 import { UnifiedManagement } from './management.js';
 import { UnifiedOwner } from './owner.js';
+import { UnifiedAttention } from './attention.js';
 
 // Explicit host composition. Merely importing this module does nothing. This
 // has account ownership fencing, but no production transport or legacy migration.
@@ -16,7 +17,7 @@ export class UnifiedRuntime {
   #closed = false;
   constructor({ file, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
-    handlers = {}, prepareScene, beforeSession = async () => {}, now = Date.now }) {
+    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
       || typeof isWakeAllowed !== 'function') throw fail('RUNTIME_HOST_ADAPTER_REQUIRED');
     this.store = new UnifiedStore(file);
@@ -35,8 +36,9 @@ export class UnifiedRuntime {
       this.scenes = new UnifiedScenes({ store: this.store, getContext: ownedContext, isAllowed, now, prepare: prepareScene });
       this.evidence = new UnifiedDshEvidence({ store: this.store });
       this.dsh = new UnifiedDshSession({ store: this.store, scenes: this.scenes, api, workspaceId, readWorkspaces });
-      this.actions = new UnifiedActions({ store: this.store, scenes: this.scenes, handlers, now });
-      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions });
+      this.attention = new UnifiedAttention({ scenes: this.scenes, isWakeAllowed, initialWakeConfig, toolAllowed, sleepBounds, now });
+      this.actions = new UnifiedActions({ store: this.store, scenes: this.scenes, handlers: { ...handlers, setWakeConfig: this.attention.handler() }, now });
+      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, toolAllowed });
       this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, now });
       this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now,
         ensureSession: async identity => {
@@ -100,7 +102,8 @@ export class UnifiedRuntime {
     // Pause/peak suppress model activity, not durable incoming messages.
     return this.store.append({ account: ctx.account, scene: key, sourceId, kind, payload, at, wake });
   }
-  tick() { this.#context(); return this.scheduler.tick(); }
+  wakeConfig(key) { this.#context(); return this.attention.config(key); }
+  tick() { this.#context(); this.attention.materialize(); return this.scheduler.tick(); }
   onDshFrame(payload, options = {}) {
     const operation = this.#frameTail.then(() => this.#onDshFrame(payload, options));
     this.#frameTail = operation.catch(() => {});
