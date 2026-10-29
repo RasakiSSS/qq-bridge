@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import vm from 'node:vm';
+import yaml from 'js-yaml';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as markdown from '../src/md-to-plain.js';
@@ -27,6 +28,9 @@ import * as memoryQzone from '../src/shared-memory-qzone.js';
 import * as memoryWorker from '../src/shared-memory-worker.js';
 import * as relationshipControl from '../src/relationship-control.js';
 import * as nativeFriends from '../src/native-friend-client.js';
+import * as unifiedHost from '../src/unified/host.js';
+import * as unifiedDriver from '../src/unified/bridge-driver.js';
+import * as unifiedSend from '../src/unified/bridge-send.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -134,6 +138,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
+    unifiedDriver, handleUnifiedIncoming, unifiedContext,
+    setConnected(value) { snowlumaHealth.connected = value; },
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
@@ -170,7 +176,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bot.onPrivateMessage(async (event) => {`);
   const timers = new Set();
   const context = vm.createContext({
-    fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
+    fs, os, path, http, crypto, yaml, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
     fetch: fakeFetch,
     // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；
     // 固定桩掉：测试不应该真去 netstat 宿主机。
@@ -185,6 +191,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
+    ...unifiedHost, ...unifiedDriver, ...unifiedSend,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -216,6 +223,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2', 'qq-chat-v2-files', 'qq-qzone', 'qq-memory']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
+    await bridge.unifiedDriver?.close();
     for (const timer of timers) clearTimeout(timer);
     bridge.sharedMemory.close();
     fs.rmSync(temp, { recursive: true, force: true });

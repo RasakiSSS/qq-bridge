@@ -36,6 +36,9 @@ import { recordQzoneMemory } from './shared-memory-qzone.js';
 import { createMemoryWorker } from './shared-memory-worker.js';
 import { createRelationshipStore, normalizeRelationshipAction, relationshipConfig, RELATION_ACTIONS } from './relationship-control.js';
 import { nativeFriendRequest } from './native-friend-client.js';
+import { startUnifiedHost } from './unified/host.js';
+import { createUnifiedBridgeDriver, assertLegacySessionsIdle } from './unified/bridge-driver.js';
+import { createBridgeSendHandler } from './unified/bridge-send.js';
 import {
   loadSlang,
   saveSlang,
@@ -80,6 +83,7 @@ const TOKEN_USAGE_FILE = path.join(STATE_DIR, 'token-usage.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 const RELATIONSHIPS_FILE = path.join(STATE_DIR, 'relationships.json');
+let closeUnifiedOnShutdown = null;
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1393,6 +1397,13 @@ let stateDirHardened = null;
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
   const cfg = loadConfig();
+  // Startup-only opt-in: changing the JSON does not hot-switch between owners.
+  const unifiedConfigured = cfg.socialV2?.unified?.enabled === true;
+  const unifiedWorkspaceId = String(cfg.socialV2?.unified?.workspaceId || '').trim();
+  if (unifiedConfigured && !unifiedWorkspaceId) throw new Error('统一模式需要显式配置现有 workspaceId；不会自动迁移或新建工作区');
+  let unifiedDriver = null;
+  let unifiedLoginPending = null;
+  const unifiedConsoleRequests = new WeakSet();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
   acquireLock();
@@ -1424,6 +1435,7 @@ async function main() {
       kind: 'reply', status: 'sent', text: message, people: peer ? [peer] : people }));
   }
   function assertMemoryModelAllowed() {
+    if (unifiedConfigured) throw new Error('统一模式不启动旧记忆模型调度');
     if (!memoryConfig().enabled || !memoryConfig().consolidate || !v2ToolEnabled('memory')) throw Error('记忆整理已关闭');
     if (currentMode !== 'reserved2' || cfg.socialV2?.enabled === false || socialV2.paused || readRoleState().mode === 'silent') throw Error('记忆整理已暂停');
     if (!dshReady || peakSleepBlocksV2(null)) throw Error('当前不能启动自动记忆整理');
@@ -1535,6 +1547,7 @@ async function main() {
   let qzoneAgent = null;
 
   function assertQzoneAllowed(context, action) {
+    if (unifiedConfigured) throw new Error('统一模式不使用旧空间会话入口');
     if (readJsonSafe(path.join(ROOT, 'config.json'), {}).socialV2?.qzone?.enabled !== true) {
       throw Object.assign(new Error('QQ 空间功能已关闭'), { statusCode: 403 });
     }
@@ -2336,7 +2349,7 @@ async function main() {
     const promptText = buildExtractionPrompt(messages);
     try {
       if (automaticModelBlockedV2()) { peakSleepLearningPending = true; return; }
-      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
+      const accepted = await legacyPrompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
       if (!accepted.result.ok) {
         log(`黑话提取被拒 (${key}): ${accepted.result.error.code}: ${accepted.result.error.message}`);
         return;
@@ -2407,7 +2420,7 @@ async function main() {
         for (const entry of targets) peakSleepResearch.set(entry.id, entry);
         return;
       }
-      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
+      const accepted = await legacyPrompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
       if (!accepted.result.ok) {
         log(`黑话研究被拒: ${accepted.result.error.code}: ${accepted.result.error.message}`);
         return;
@@ -2554,6 +2567,10 @@ async function main() {
     // 默认只允许把 launch token 交给回环地址；远程 DSH 需要显式 opt-in（见 dsh-client.ensureAuth）。
     allowRemote: cfg.dsh.allowRemote === true
   });
+  const legacyPrompt = (input) => {
+    if (unifiedConfigured) throw new Error('统一模式已禁止旧会话模型投递');
+    return api.sessions.prompt(input);
+  };
   // DSH 的模型目录 RPC：0.1.5 是 `session/modelCatalog`。**不能走基类门面**
   // `api.sessions.modelCatalog` —— 桥接钉住的 `@deepseek-ai/dsh-host-apiproxy@0.1.1-rc.2`
   // 的 sessions 门面里根本没有这个方法（只有 `models` → 已下线的 `session/models`），
@@ -2805,7 +2822,9 @@ async function main() {
           const rawOwner = String(rawOwnerValue ?? '').trim();
           if (rawOwner) {
             try {
-              cfg.ownerQQ = normalizeOwnerQQ(rawOwner);
+              const nextOwner = normalizeOwnerQQ(rawOwner);
+              if (unifiedConfigured && String(cfg.ownerQQ) !== String(nextOwner)) sessionEpoch++;
+              cfg.ownerQQ = nextOwner;
             } catch (error) {
               log(`DSH settings ownerQQ 无效，已忽略: ${error?.message ?? error}`);
             }
@@ -3088,7 +3107,7 @@ async function main() {
       if (!dshReady || dshPresetIds.length === 0) {
         try { await refreshPresetList(); } catch {}
       }
-      reconcileSessionPolicies();
+      if (!unifiedConfigured) reconcileSessionPolicies();
       if (!dshReady) {
         dshReady = true;
         lastMode = currentMode;
@@ -3102,7 +3121,7 @@ async function main() {
           }
           log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
         }
-        try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
+        if (!unifiedConfigured) try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
         // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
         for (const key of [...slangWindows.keys()]) maybeQueueSlangExtraction(key);
       } else if (currentMode !== lastMode) {
@@ -3332,6 +3351,7 @@ async function main() {
       return x.length === y.length && crypto.timingSafeEqual(x, y);
     };
     const agentTokenOk = (key, token) => {
+      if (unifiedConfigured) return false;
       const canonical = canonicalV2Key(key);
       const st = socialV2.conversations.get(canonical ?? key);
       return !!st && !!st.agentToken && tokenEq(token, st.agentToken);
@@ -3469,6 +3489,10 @@ async function main() {
         return;
       }
       // 智能体调用隔离（集中关卡）。
+      if (unifiedConfigured && (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined)) {
+        sendJson({ ok: false, error: '统一模式请使用主会话专用工具，旧会话入口已停用' }, 403);
+        return;
+      }
       //
       // 背景：控制台令牌是「管理端全权」，会话令牌是「只能动自己这个会话」。MCP 工具进程
       // 两者都持有，所以「这次请求到底是智能体发的还是管理端发的」必须由请求自己声明。
@@ -3525,6 +3549,18 @@ async function main() {
       }
       try {
         // 空 agent token 一律拒绝，防止 MCP 传入空字符串时被当作“管理端/无 token”绕过校验
+        if (unifiedConfigured && req.method === 'POST' && ['/api/socialV2/reset', '/api/session/reset', '/api/workspace/reset'].includes(url.pathname)) {
+          sendJson({ ok: false, error: '统一模式尚未提供迁移/重置流程，保留现有会话与记录' }, 409);
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/unified/permission') {
+          if (!unifiedConfigured || !unifiedDriver) { sendJson({ ok: false, error: '统一模式未就绪' }, 409); return; }
+          const body = await readBody();
+          unifiedConsoleRequests.add(req);
+          try { sendJson({ ok: true, ...await unifiedDriver.fromConsole(req, body.permission) }); }
+          finally { unifiedConsoleRequests.delete(req); }
+          return;
+        }
         if (req.headers['x-agent-token'] === '') {
           sendJson({ ok: false, error: 'agent token 不能为空' }, 403);
           return;
@@ -4258,8 +4294,9 @@ async function main() {
           atomicWriteJson(configFile, file);
           cfg.allow = { private: allow.private, groups: allow.groups };
           cfg.deny = { private: deny.private, groups: deny.groups };
+          if (unifiedConfigured && String(cfg.ownerQQ) !== String(ownerQQ)) sessionEpoch++;
           cfg.ownerQQ = ownerQQ;
-          reconcileSessionPolicies();
+          if (!unifiedConfigured) reconcileSessionPolicies();
           log(`控制台：白名单已更新（群: ${allow.groups.join(',') || '无'}，私聊: ${allow.private.join(',') || '无'}，管理员: ${ownerQQ ?? '未设置'}）`);
           sendJson({ ok: true, allow, deny, ownerQQ });
           return;
@@ -8190,7 +8227,8 @@ async function main() {
     return delays;
   }
 
-  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
+  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null, unifiedGuard = null) {
+    if (unifiedConfigured && typeof unifiedGuard !== 'function') throw new Error('统一模式拒绝旧会话发送');
     const assertSendAllowed = captureSendGuard(key);
     const [kind, id] = key.split(':');
     const sent = [];
@@ -8201,6 +8239,8 @@ async function main() {
       const useAt = i === 0 ? atUserId : null;
       sendChain = sendChain
         .then(async () => {
+          if (unifiedGuard && failed.length) return;
+          unifiedGuard?.();
           assertSendAllowed();
           await onebotSend(kind, id, msg, useReply, useAt);
           sent.push(msg);
@@ -8312,6 +8352,7 @@ async function main() {
   }
 
   async function ensureSession(key) {
+    if (unifiedConfigured) throw new Error('统一模式不创建旧的逐聊天会话');
     const epoch = sessionEpoch;
     const policy = sessionPolicy(key);
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
@@ -8459,6 +8500,7 @@ async function main() {
   }
 
   function automaticModelBlockedV2(key) {
+    if (unifiedConfigured) return true;
     return currentMode === 'reserved2' && (socialV2.paused || peakSleepBlocksV2(key));
   }
 
@@ -8501,6 +8543,7 @@ async function main() {
   }
 
   function peakSleepTickV2() {
+    if (unifiedConfigured) return;
     const enabled = peakSleepEnabledV2();
     const sleeping = peakSleepAtV2();
     if (enabled && !peakSleepLastEnabled) log('[reserved2] 峰谷自动休眠功能已启用（北京时间 UTC+8）');
@@ -9496,7 +9539,7 @@ async function main() {
     if (opts.farewell) social.exitingSessions.add(sessionId);
     let accepted;
     try {
-      accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content });
+      accepted = await legacyPrompt({ sessionId, mode: 'queue', content });
     } catch (error) {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
       throw error;
@@ -10623,6 +10666,7 @@ async function main() {
   }
 
   async function sendWakePromptV2(key, reason) {
+    if (unifiedConfigured) return;
     if (cfg.socialV2?.enabled === false) return;
     if (currentMode !== 'reserved2' || socialV2.paused) return;
     if (!isSessionAllowedInCurrentMode(key)) {
@@ -10819,6 +10863,7 @@ async function main() {
   }
 
   function scheduleWakeV2(key, reason) {
+    if (unifiedConfigured) return;
     if (cfg.socialV2?.enabled === false) return;
     if (socialV2.paused) return;
     if (!isSessionAllowedInCurrentMode(key)) {
@@ -10907,6 +10952,7 @@ async function main() {
   }
 
   function setupSleepTimerV2(key) {
+    if (unifiedConfigured) return;
     if (cfg.socialV2?.enabled === false) return;
     if (!isSessionAllowedInCurrentMode(key)) return;
     if (peakSleepBlocksV2(key)) { peakSleepSuspendedKeys.add(key); return; }
@@ -10955,6 +11001,7 @@ async function main() {
   }
 
   function scheduleProactiveCheckV2(key) {
+    if (unifiedConfigured) return;
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
     if (peakSleepBlocksV2(key)) { peakSleepSuspendedKeys.add(key); return; }
@@ -11046,6 +11093,10 @@ async function main() {
     const key = convKey(kind, id);
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
       log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
+      return;
+    }
+    if (unifiedConfigured) {
+      await handleUnifiedIncoming(key, kind, event);
       return;
     }
     // 在任何异步名字/引用解析之前记录，A 群入站后 B 群可立即检索。
@@ -11369,7 +11420,7 @@ async function main() {
       if (peakSleepBlocksV2(key)) deferPeakWakeV2(key, 'replyCheck');
       return;
     }
-    const accepted = await api.sessions.prompt({
+    const accepted = await legacyPrompt({
       sessionId,
       mode: 'queue',
       content
@@ -11594,6 +11645,13 @@ async function main() {
         for await (const envelope of api.events.mux({})) {
           framesThisStream += 1;
           const frame = envelope.payload;
+          if (unifiedConfigured && unifiedDriver) {
+            if (frame.type === 'session/snapshot') recordSessionSnapshot(frame.sessionId, frame.snapshot);
+            if (frame.type === 'session/event') recordSessionUsage(frame.sessionId, frame.event);
+            await unifiedDriver.onDshFrame(frame).catch(() => log('[unified] DSH 回执暂无法确认，保留待核对状态'));
+            // Old sessions may finish, but cannot regain outgoing ownership.
+            continue;
+          }
           // 会话开场快照：只喂 token 账本。它含**历史** turn/end，绝不能让它们走
           // session/event 通道 —— 否则桥接会把早已结束的回合当成新回合去发 QQ 回复。
           if (frame.type === 'session/snapshot') {
@@ -12059,6 +12117,62 @@ async function main() {
   }
 
   // QQ 侧（SnowLuma OneBot WebSocket 客户端）
+  function unifiedContext() {
+    return {
+      account: selfUserId, ownerQQ: cfg.ownerQQ == null ? null : String(cfg.ownerQQ),
+      identityEpoch: sessionEpoch,
+      enabled: currentMode === 'reserved2' && cfg.socialV2?.enabled !== false && dshReady && snowlumaHealth.connected && !unifiedLoginPending,
+      paused: socialV2.paused,
+      peakEnabled: cfg.socialV2?.peakSleep?.enabled === true,
+      priceTable: { holidays: CN_HOLIDAYS_2026, ...(cfg.pricing ?? {}) },
+    };
+  }
+  function assertUnifiedInstallation() {
+    if (!unifiedConfigured || Number(fs.readFileSync(LOCK_FILE, 'utf8').trim()) !== process.pid) throw new Error('统一实例已失去安装运行权');
+  }
+  function unifiedBindingExcluded(file) {
+    // The new preset has no direct filesystem tool. Also exclude credentials
+    // from the existing administrator filesystem roots and working directory.
+    const preset = yaml.load(fs.readFileSync(path.join(ROOT, 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml'), 'utf8'));
+    if (!Array.isArray(preset)) return false;
+    const roots = [cfg.sessionCwd || path.join(STATE_DIR, 'agents')];
+    for (const row of preset) {
+      if (row?.config?.serverName !== 'qq-workspace-files') continue;
+      const args = row.config.args;
+      if (!Array.isArray(args) || args.length < 2) return false;
+      roots.push(...args.slice(1));
+    }
+    return roots.every(root => {
+      if (typeof root !== 'string' || !path.isAbsolute(root)) return false;
+      const resolved = fs.existsSync(root) ? fs.realpathSync(root) : path.resolve(root);
+      const relative = path.relative(resolved, file);
+      return relative.startsWith('..' + path.sep) || path.isAbsolute(relative);
+    });
+  }
+  async function handleUnifiedIncoming(key, kind, event) {
+    if (unifiedLoginPending) await unifiedLoginPending;
+    if (!unifiedDriver || !selfUserId || String(event.self_id) !== selfUserId || !snowlumaHealth.connected) return;
+    const management = await unifiedDriver.fromQQ(bot, event);
+    if (management.handled) {
+      if (management.response) await sendToQQ(key, management.response);
+      return;
+    }
+    const content = typeof event.message === 'string' ? event.message : await segmentsToText(event.message || [], { includeReply: false });
+    const quotedSelf = Array.isArray(event.message) && await isQuoteTargetSelf(event.message, kind, key.split(':')[1], event.self_id);
+    const st = getSocialV2State(key);
+    const reason = evaluateWakeTriggerV2(key, st, event, kind, content, content, quotedSelf);
+    const sourceId = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '')
+      || crypto.createHash('sha256').update(JSON.stringify([event.self_id, key, event.user_id, event.time, event.message])).digest('hex');
+    const payload = {
+      text: content, senderQQ: String(event.user_id), sender: event.sender?.card || event.sender?.nickname || String(event.user_id),
+      messageId: sourceId, reason: reason || null,
+      media: extractMediaFromSegments(Array.isArray(event.message) ? event.message : []),
+    };
+    await unifiedDriver.ingest({ key, sourceId, payload, at: Number(event.time) > 0 ? Number(event.time) * 1000 : Date.now(), wake: !!reason });
+    withMemory(() => sharedMemory.record({ accountQQ: selfUserId, source: key, actorQQ: event.user_id,
+      name: payload.sender, text: content, externalId: sourceId, time: Number(event.time) * 1000, kind: 'message' }));
+  }
+
   const bot = new SnowLumaWebSocketClient({
     url: cfg.snowluma.wsUrl,
     accessToken: cfg.snowluma.accessToken || undefined,
@@ -12070,10 +12184,57 @@ async function main() {
   // 在 QQ 接收回调注册前应用本地模式，避免启动探活期间暂按 chat 接收而绕过二代落库。
   const startupMode = normalizeModeInput(readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode);
   if (startupMode) currentMode = startupMode;
+  if (unifiedConfigured) {
+    const sender = createBridgeSendHandler({
+      assertAllowed: key => {
+        assertUnifiedInstallation();
+      if (currentMode !== 'reserved2' || !snowlumaHealth.connected || socialV2.paused || cfg.socialV2?.enabled === false
+          || !isSessionAllowedInCurrentMode(key) || !v2ToolEnabled('sendMessage') || shouldBlockSilentReply(key)) throw new Error('统一发送权限已变化');
+      },
+      getConfig: () => cfg.socialV2?.send || {}, getState: getSocialV2State, saveState: saveSocialV2State,
+      audit: (_key, message) => {
+        if (SENSITIVE_RE.test(message) || [...KNOWN_AGENT_TOKENS].some(token => token && message.includes(token))) throw new Error('发送内容被安全检查拦截');
+      },
+      resolveReply: resolveReplyTargetV2, send: sendMessagesV2, record: recordSentMessagesV2,
+      computeDelays: (messages, config) => computeGapsV2(messages, 'auto', undefined, [], config),
+    });
+    unifiedDriver = createUnifiedBridgeDriver({ log,
+      ready: () => !!selfUserId && unifiedContext().enabled && !socialV2.paused,
+      createHost: () => {
+        if (!selfUserId) throw new Error('机器人身份尚未验证');
+        const account = selfUserId;
+        return startUnifiedHost({ bindingFile: path.join(STATE_DIR, 'unified-mcp.json'),
+          assertInstallationOwner: assertUnifiedInstallation, isExcludedFromModelFiles: unifiedBindingExcluded,
+          runtimeOptions: {
+            file: path.join(STATE_DIR, 'unified.sqlite'), workspaceId: unifiedWorkspaceId, api,
+            getContext: () => { if (selfUserId !== account) throw new Error('统一模式账号已变化，请完成交接后重启'); return unifiedContext(); },
+            isAllowed: key => key !== 'qzone' && isSessionAllowedInCurrentMode(key),
+            isWakeAllowed: row => !shouldBlockSilentReply(row.scene),
+            configureModel: async ({ sessionId }) => (await ensureChatModel(sessionId)) === 'applied',
+            beforeSession: async () => {
+              if (!dshPresetIds.includes('qq-unified')) throw new Error('DSH 尚未安装统一主预设');
+              const qzoneFile = path.join(STATE_DIR, 'qzone-session.json');
+              const oldQzone = fs.existsSync(qzoneFile) ? JSON.parse(fs.readFileSync(qzoneFile, 'utf8')) : { sessions: [] };
+              if (!Array.isArray(oldQzone.sessions)) throw new Error('旧空间记录不可验证');
+              await assertLegacySessionsIdle(api, [...Object.values(state.sessions), ...oldQzone.sessions.map(row => row.sessionId), ...learnerSessions]);
+            },
+            authenticateQQ: (connection, event) => connection === bot && snowlumaHealth.connected && String(event.self_id) === account,
+            authenticateConsole: request => unifiedConsoleRequests.has(request),
+            handlers: { sendMessage: sender },
+          },
+        });
+      },
+    });
+    closeUnifiedOnShutdown = () => unifiedDriver.close();
+    unifiedDriver.start();
+    log('[unified] 统一模式开发入口已选择，旧自动投递停止；未迁移历史，空间与文件等能力尚未接通');
+  }
   peakSleepTickV2();
   setInterval(peakSleepTickV2, 1000).unref?.();
-  initQzone();
-  setInterval(() => { void qzoneService.run(); }, 30000).unref?.();
+  if (!unifiedConfigured) {
+    initQzone();
+    setInterval(() => { void qzoneService.run(); }, 30000).unref?.();
+  }
   memoryWorker = createMemoryWorker({ api, memory: sharedMemory, getConfig: memoryConfig, getAccount: () => selfUserId,
     ensureWorkspace: ensureChatWorkspace, resolvePreset: () => resolvePresetName('qq-memory', { strict: true }), ensureModel: ensureChatModel,
     assertAllowed: assertMemoryModelAllowed, log });
@@ -12165,14 +12326,16 @@ async function main() {
     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
     void pollSnowlumaStatus();
     // 读取机器人昵称（用于社交模式"被提到"识别）；重连后也会刷新
-    bot.getLoginInfo().then((login) => {
+    const loginPending = bot.getLoginInfo().then((login) => {
       if (login?.nickname) {
         selfNickname = String(login.nickname).toLowerCase();
         selfDisplayName = String(login.nickname).trim();
         log(`机器人昵称: ${login.nickname}`);
       }
       if (login?.user_id != null) selfUserId = String(login.user_id);
-    }).catch(() => {});
+      else if (unifiedConfigured) selfUserId = '';
+    }).catch(() => { if (unifiedConfigured) selfUserId = ''; }).finally(() => { if (unifiedLoginPending === loginPending) unifiedLoginPending = null; });
+    if (unifiedConfigured) unifiedLoginPending = loginPending;
     // 连接成功后顺手确认一下 token 是否已跟当前账号对齐；不一致就写回 config.json，
     // 让 MCP 工具（另一个进程）也能拿到正确的 token。
     void syncTokenToFile();
@@ -12316,17 +12479,17 @@ async function main() {
   await pumpMux();
 }
 
-process.on('SIGINT', () => {
+let shutdownStarted = false;
+async function gracefulShutdown() {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   log('退出中…');
-  saveState();
-  releaseLock();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  saveState();
-  releaseLock();
-  process.exit(0);
-});
+  try { await closeUnifiedOnShutdown?.(); }
+  catch { log('[unified] 关闭时未能完成凭据清理，旧凭据已撤销；下次启动须核验运行权'); }
+  saveState(); releaseLock(); process.exit(0);
+}
+process.on('SIGINT', () => { void gracefulShutdown(); });
+process.on('SIGTERM', () => { void gracefulShutdown(); });
 process.on('unhandledRejection', (error) => {
   // 打出 stack：只记 message 的话，「偶发一次」和「已经坏了六小时」看起来一模一样。
   log('未处理异常:', error?.stack ?? error?.message ?? error);

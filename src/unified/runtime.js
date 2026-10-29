@@ -16,7 +16,7 @@ export class UnifiedRuntime {
   #closed = false;
   constructor({ file, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
-    handlers = {}, prepareScene, now = Date.now }) {
+    handlers = {}, prepareScene, beforeSession = async () => {}, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
       || typeof isWakeAllowed !== 'function') throw fail('RUNTIME_HOST_ADAPTER_REQUIRED');
     this.store = new UnifiedStore(file);
@@ -30,6 +30,7 @@ export class UnifiedRuntime {
         return ctx;
       };
       this.api = api;
+      this.beforeSession = beforeSession;
       this.bindMainTools = bindMainTools;
       this.scenes = new UnifiedScenes({ store: this.store, getContext: ownedContext, isAllowed, now, prepare: prepareScene });
       this.evidence = new UnifiedDshEvidence({ store: this.store });
@@ -45,6 +46,7 @@ export class UnifiedRuntime {
             if (ctx.account !== before.account || ctx.ownerQQ !== before.ownerQQ || ctx.identityEpoch !== before.identityEpoch
               || this.store.account(ctx.account).session_id !== identity.sessionId) throw fail('IDENTITY_CHANGED');
           };
+          await this.beforeSession(identity); check();
           const sid = await this.dsh.ensure(identity); check();
           if (await configureModel({ ...identity }) !== true) throw fail('MODEL_CONFIGURATION_FAILED');
           check();
@@ -86,6 +88,7 @@ export class UnifiedRuntime {
     const sessionId = this.store.account(before.account).session_id;
     if (!sessionId) return { status: 'idle' };
     const identity = { account: before.account, sessionId };
+    await this.beforeSession(identity);
     await this.dsh.ensure(identity, { existingOnly: true, allowBusy: true });
     await this.#bind(identity, before);
     this.api.events.follow(sessionId);
