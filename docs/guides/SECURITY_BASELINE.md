@@ -183,6 +183,8 @@ node --check src/bridge.js  # 语法门禁（大文件改动后必跑）
 
 ## 五、改动检查单（每个 PR 自问）
 
+统一主会话 MCP（开发中，未挂载生产）：`src/unified/mcp-http.js` 仅显式监听回环，校验 Host、拒绝 Origin，发现/调用均鉴权，调用元数据须匹配主 session。`qq-unified-client.mjs` 从 DSH 执行上下文取得稳定 callId，拒绝 HTTP 重定向和自动重试，不输出通信异常详情。新预设守卫拒绝继承旧 SnowLuma/Filesystem 工具作为旁路。凭据文件发布、ACL 核验及文件工具排除该路径仍是生产挂载前置项；当前没有写入真实凭据或启动新监听。
+
 1. 这次改动有没有让某个"不确定"变成"放行"？（违反 fail-closed 即阻断）
 2. 有没有新增一个**只有控制台该用**的端点却没进 agent 白名单的默认拒绝？
 3. 有没有新增读写文件的路径参数？它是否做了包含性校验与 realpath？

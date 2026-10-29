@@ -130,3 +130,17 @@ node --test --test-reporter=dot scripts/test-unified-foundation.mjs scripts/test
 下一次优先做 **生产 MCP transport + qq-unified preset/守卫 + bridge 入口接线**。先解决稳定 DSH tool-call ID 的传递和主凭据仅注入主会话的问题，再注册真实写动作；不能直接把旧管理员文件 MCP 全局挂到主会话，必须走全局等级代理。随后接等待/睡眠/总结、空间采集拆分、旧模式停止与新模式所有权交接。新运行锁只能隔离统一运行实例，旧 bridge 尚不使用该锁，因此上线前必须明确停止旧模式的自动投递，不能双开。
 
 本轮未实现主 preset、生产工具监听、发送/文件/好友处理器、独立空间采集、总结 worker 或旧会话迁移；还不能声明单 session 版本可上线。生产重载继续留到这些完成并验证后进行。
+
+## 2026-10-29 MCP 通信层与主预设
+
+在 `0a6e503` 基础上继续，开工备份为 `codex/backup-unified-transport-20261029`。新增显式启动的 `startUnifiedMcpHttp`，只绑定回环地址，校验 Host、拒绝浏览器 Origin，限制请求体 64 KiB。发现工具也必须通过主 bearer 与已绑定 session 核验；执行请求必须携带宿主工具调用 ID。没有新增生产监听或启动它的配置。
+
+已安装 DSH 自带 MCP 客户端不转发 execution.callId，因此新增只供主预设使用的 `qq-unified-client`。它从真实 ToolRuntime 的 `exec.agent.session.id` 和 `exec.callId` 构造 MCP 元数据，不从模型参数获取身份；禁止 HTTP 重定向，不自动重试工具调用，连接异常不输出 endpoint 或凭据。六工具的 DSH 参数 schema 从同一份 Zod schema 生成。HTTP request ID 不作为动作去重 ID。
+
+主预设 `qq-unified` 已加入 bundle，专用守卫只允许这六个工具以及 todo/四个上下文工具，拒绝旧 SnowLuma、Filesystem、子 Agent、宿主执行工具绕过统一入口。预设标明开发中、动作尚未提供。既有人格源文件与个人角色文件未修改，旧 preset patch 未重新生成；最终人格衔接仍需上线集成时完成。
+
+连接器约定宿主绑定文件为 `state/unified-mcp.json`，结构 `{version:1, sessionId, endpoint, token}`。**尚未编写绑定发布/清理器，未生成真实凭据文件**。后续宿主必须在已验证主身份后原子发布，确认 state 权限及文件工具不可访问该文件；关闭/换身份撤销并清理自己的绑定，不能把凭据放入提示词、模型参数或子 Agent 环境。仅凭此约定不代表权限和生产部署已完成。
+
+完整相关回归 **159 项通过**，新增 6 项覆盖真实回环 MCP、连接器身份传递、取消、主/子会话隔离、吊销、无凭据发现、Origin/Host、请求体预算、静态错误和预设守卫。测试仅使用临时 SQLite、模拟 DSH execution 与回环 HTTP；尚未在真实 DSH 加载新预设，也未发送 QQ。
+
+下一步：完成宿主凭据发布器与生命周期，将 runtime/transport 接入 bridge 的显式统一模式开关，并隔离旧模式调度；接真实动作处理器、管理入口、等待/睡眠、总结、空间通知与历史导入。六工具通信已通，不能将其描述为全功能单 session 已上线。

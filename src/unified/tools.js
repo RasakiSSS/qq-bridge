@@ -16,6 +16,12 @@ const definitions = {
   qq_mark_read: ['确认已读或明确略过回执中的消息；不会清除回执之后到达的消息。', { receipt: handle }],
 };
 const schemas = Object.fromEntries(Object.entries(definitions).map(([name, [, shape]]) => [name, z.object(shape).strict()]));
+export function unifiedToolCatalog() {
+  return Object.entries(definitions).map(([name, [description]]) => {
+    const { $schema, ...parameters } = z.toJSONSchema(schemas[name]);
+    return { name, description, parameters };
+  });
+}
 const digest = (token) => createHash('sha256').update(token).digest();
 
 // HOST ONLY: issue/revoke must never be exported as MCP or unauthenticated HTTP
@@ -38,6 +44,14 @@ export class UnifiedTools {
     return token;
   }
   revoke() { this.#credential = undefined; }
+  // HOST transport only. Session metadata is checked against the bearer binding.
+  authenticate(token, sessionId) {
+    this.#authorize(token);
+    const ctx = this.scenes.context();
+    const bound = this.scenes.store.account(ctx.account).session_id;
+    if (sessionId !== bound) throw fail('UNAUTHORIZED');
+    return { account: ctx.account, sessionId: bound };
+  }
   #authorize(token) {
     const credential = this.#credential;
     if (!credential || typeof token !== 'string' || token.length !== 64
@@ -87,9 +101,9 @@ const errors = new Set(['UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAU
 export function createUnifiedMcpServer({ dispatch }) {
   const server = new McpServer({ name: 'qq-unified', version: '0.1.0' });
   for (const [name, [description, shape]] of Object.entries(definitions)) {
-    server.tool(name, description, shape, async (args) => {
+    server.tool(name, description, shape, async (args, extra) => {
       try {
-        const result = await dispatch(name, args);
+        const result = await dispatch(name, args, extra?._meta);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (error) {
         const code = errors.has(error?.code) ? error.code : 'UNIFIED_TOOL_FAILED';
