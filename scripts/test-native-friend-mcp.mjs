@@ -29,6 +29,7 @@ test('UID lookup and client use trusted account DB, fixed local endpoint and fin
       return { ok: true, json: async () => ({ status: 'native_returned', nativeInvoked: true, outcome: { result: 0, responseResult: 0, errorCode: 0 } }) };
     } };
   assert.equal((await nativeFriendRequest(options)).status, 'succeeded'); assert.equal(checks, 2);
+  await assert.rejects(nativeFriendRequest({ ...options, expectedAccount: '222222222' })); assert.equal(called, 1);
   await assert.rejects(nativeFriendRequest({ ...options, assertAllowed: () => { throw Error('paused'); } })); assert.equal(called, 1);
 });
 

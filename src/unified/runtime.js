@@ -7,6 +7,8 @@ import { UnifiedActions } from './actions.js';
 import { UnifiedManagement } from './management.js';
 import { UnifiedOwner } from './owner.js';
 import { UnifiedAttention } from './attention.js';
+import { UnifiedRelationships } from './relationships.js';
+import { UnifiedFiles } from './files.js';
 
 // Explicit host composition. Merely importing this module does nothing. This
 // has account ownership fencing, but no production transport or legacy migration.
@@ -17,7 +19,7 @@ export class UnifiedRuntime {
   #closed = false;
   constructor({ file, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
-    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, now = Date.now }) {
+    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
       || typeof isWakeAllowed !== 'function') throw fail('RUNTIME_HOST_ADAPTER_REQUIRED');
     this.store = new UnifiedStore(file);
@@ -37,8 +39,15 @@ export class UnifiedRuntime {
       this.evidence = new UnifiedDshEvidence({ store: this.store });
       this.dsh = new UnifiedDshSession({ store: this.store, scenes: this.scenes, api, workspaceId, readWorkspaces });
       this.attention = new UnifiedAttention({ scenes: this.scenes, isWakeAllowed, initialWakeConfig, toolAllowed, sleepBounds, now });
+      if (relationships) {
+        this.relationships = new UnifiedRelationships({ ...relationships, scenes: this.scenes, now });
+        handlers = { ...handlers };
+        for (const action of ['accept_request', 'reject_request', 'delete_friend', 'leave_group', 'request_friend'])
+          handlers[`relationship:${action}`] = this.relationships.handler(action);
+      }
+      if (files) handlers = { ...handlers, workspaceFile: new UnifiedFiles(files).handler() };
       this.actions = new UnifiedActions({ store: this.store, scenes: this.scenes, handlers: { ...handlers, setWakeConfig: this.attention.handler() }, now });
-      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, toolAllowed });
+      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, toolAllowed });
       this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, now });
       this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now,
         ensureSession: async identity => {
@@ -103,6 +112,7 @@ export class UnifiedRuntime {
     return this.store.append({ account: ctx.account, scene: key, sourceId, kind, payload, at, wake });
   }
   wakeConfig(key) { this.#context(); return this.attention.config(key); }
+  friendRequest(event) { this.#context(); if (!this.relationships) throw fail('ACTION_DENIED'); return this.relationships.ingest(event); }
   tick() { this.#context(); this.attention.materialize(); return this.scheduler.tick(); }
   onDshFrame(payload, options = {}) {
     const operation = this.#frameTail.then(() => this.#onDshFrame(payload, options));

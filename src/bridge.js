@@ -35,6 +35,8 @@ import { createSharedMemory, sharedMemoryConfig, SHARED_MEMORY_HINT } from './sh
 import { recordQzoneMemory } from './shared-memory-qzone.js';
 import { createMemoryWorker } from './shared-memory-worker.js';
 import { createRelationshipStore, normalizeRelationshipAction, relationshipConfig, RELATION_ACTIONS } from './relationship-control.js';
+import { UnifiedNativeGrants } from './unified/relationships.js';
+import { workspaceServer } from './unified/files.js';
 import { nativeFriendRequest } from './native-friend-client.js';
 import { startUnifiedHost } from './unified/host.js';
 import { createUnifiedBridgeDriver, assertLegacySessionsIdle } from './unified/bridge-driver.js';
@@ -1448,6 +1450,25 @@ async function main() {
   });
   let relationshipErrorAt = 0;
   const relationshipSettings = () => relationshipConfig(cfg.socialV2?.relationships);
+  const unifiedNativeGrants = new UnifiedNativeGrants();
+  function unifiedRelationshipPolicy(action) {
+    if (!unifiedConfigured || !relationshipEnabled(action) || currentMode !== 'reserved2' || socialV2.paused
+      || cfg.socialV2?.enabled === false || readRoleState().mode === 'silent' || !dshReady
+      || !selfUserId || unifiedLoginPending || !snowlumaHealth.connected) throw Object.assign(new Error('关系操作不可用'), { code: 'ACTION_DENIED' });
+  }
+  async function unifiedNativeRequest({ account, input, assertCurrent }) {
+    const check = () => {
+      assertCurrent(); unifiedRelationshipPolicy(RELATION_ACTIONS.REQUEST_FRIEND);
+      if (selfUserId !== account) throw Object.assign(new Error('账号变化'), { code: 'IDENTITY_CHANGED' });
+      if (SENSITIVE_RE.test(input.answer) || [...KNOWN_AGENT_TOKENS].some(token => token && input.answer.includes(token))) throw Object.assign(new Error('申请说明被安全拦截'), { code: 'ACTION_DENIED' });
+    };
+    check();
+    const key = `unified:${account}`, grant = unifiedNativeGrants.issue({ ...input, key }, check);
+    try {
+      return await nativeFriendRequest({ configFile: cfg.socialV2.relationships.nativeConfigFile, input, key,
+        agentToken: grant.token, expectedAccount: account, assertAllowed: check });
+    } finally { grant.revoke(); }
+  }
   const relationshipActionFlag = Object.freeze({
     [RELATION_ACTIONS.ACCEPT_REQUEST]: 'acceptRequests',
     [RELATION_ACTIONS.REJECT_REQUEST]: 'rejectRequests',
@@ -3592,6 +3613,11 @@ async function main() {
         if (unifiedConfigured && req.method === 'POST' && ['/api/socialV2/reset', '/api/session/reset', '/api/workspace/reset'].includes(url.pathname)) {
           sendJson({ ok: false, error: '统一模式尚未提供迁移/重置流程，保留现有会话与记录' }, 409);
           return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/unified/relationships/native-authorize') {
+          const body = await readBody();
+          const granted = unifiedConfigured && unifiedNativeGrants.authorize(body, req.headers['x-unified-native-grant']);
+          sendJson({ ok: granted }, granted ? 200 : 403); return;
         }
         if (req.method === 'POST' && url.pathname === '/api/unified/permission') {
           if (!unifiedConfigured || !unifiedDriver) { sendJson({ ok: false, error: '统一模式未就绪' }, 409); return; }
@@ -12254,6 +12280,15 @@ async function main() {
             initialWakeConfig: key => getSocialV2State(key).wakeConfig,
             toolAllowed: name => v2ToolEnabled(name),
             sleepBounds: () => cfg.socialV2?.wake || {},
+            relationships: { policy: unifiedRelationshipPolicy,
+              request: (action, params) => withTimeout(bot.request(action, params), 15000, '统一关系请求'),
+              nativeRequest: unifiedNativeRequest },
+            files: {
+              getServer: () => workspaceServer(yaml.load(fs.readFileSync(path.join(ROOT, 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml'), 'utf8')), path.join(STATE_DIR, 'unified-mcp.json')),
+              policy: () => {
+                if (!unifiedConfigured || readRoleState().mode === 'silent') throw Object.assign(new Error('文件功能不可用'), { code: 'FILES_UNAVAILABLE' });
+              },
+            },
             configureModel: async ({ sessionId }) => (await ensureChatModel(sessionId)) === 'applied',
             beforeSession: async () => {
               if (!dshPresetIds.includes('qq-unified')) throw new Error('DSH 尚未安装统一主预设');
@@ -12308,6 +12343,10 @@ async function main() {
   try {
     bot.onRequest('friend', (event) => {
       if (!relationshipEnabled()) return;
+      if (unifiedConfigured) {
+        if (!selfUserId || unifiedLoginPending || !snowlumaHealth.connected || String(event?.self_id) !== selfUserId) return;
+        return unifiedDriver.friendRequest(event).catch(() => log('[unified] 好友申请保存失败，未执行关系操作'));
+      }
       const request = withRelationships(() => relationshipStore.recordRequest(event), null);
       if (!request) return;
       const ownerKey = `private:${String(cfg.ownerQQ ?? '').trim()}`;

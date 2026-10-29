@@ -43,6 +43,7 @@ export async function startUnifiedHost({ bindingFile, assertInstallationOwner, i
     },
     tick: () => run(() => runtime.tick()),
     wakeConfig: key => run(() => runtime.wakeConfig(key)),
+    friendRequest: event => run(() => runtime.friendRequest(event)),
     restore: () => run(() => runtime.restore()),
     onDshFrame: (...args) => run(() => runtime.onDshFrame(...args)),
     fromQQ: (...args) => run(() => runtime.management.fromQQ(...args)),

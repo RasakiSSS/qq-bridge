@@ -31,6 +31,8 @@ import * as nativeFriends from '../src/native-friend-client.js';
 import * as unifiedHost from '../src/unified/host.js';
 import * as unifiedDriver from '../src/unified/bridge-driver.js';
 import * as unifiedSend from '../src/unified/bridge-send.js';
+import * as unifiedRelations from '../src/unified/relationships.js';
+import * as unifiedFiles from '../src/unified/files.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -191,7 +193,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
-    ...unifiedHost, ...unifiedDriver, ...unifiedSend,
+    ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

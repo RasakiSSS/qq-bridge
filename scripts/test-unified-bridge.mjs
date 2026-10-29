@@ -10,14 +10,14 @@ import { createUnifiedBridgeDriver, assertLegacySessionsIdle } from '../src/unif
 import { invokeMainTool } from '../plugins/qq-agent-presets/qq-unified-client.mjs';
 
 const ok = value => ({ result: { ok: true, value } });
-async function fixture(t, options = {}) {
+async function fixture(t, options = {}, globals = {}) {
   let sid;
   const h = await bridgeHarness({ config: { socialV2: { unified: { enabled: true, workspaceId: 'fixture-workspace' }, sharedMemory: { enabled: false }, ...options } },
     files: { 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml': '[]' },
     globals: { startUnifiedHost: input => startUnifiedHost({ ...input,
       bindingOptions: { verify: () => true, harden: () => ({ ok: true }) },
       runtimeOptions: { ...input.runtimeOptions, readWorkspaces: async () => ({ items: [{ workspaceId: 'fixture-workspace', sessionIds: sid ? [sid] : [] }], archivedSessionIds: [] }) },
-    }) },
+    }), ...globals },
   });
   t.after(() => h.close());
   h.setPresets(['qq-unified']); h.setMode('reserved2'); h.setSelfIdentity('fixture', '100'); h.setConnected(true);
@@ -54,6 +54,85 @@ test('real bridge inbox, main session and shared QQ send queue operate together 
   await h.call('qq_send_message', args);
   assert.equal(h.calls.http.filter(row => row.url.endsWith('/send_private_msg')).length, 1);
   assert.equal(JSON.parse((await h.call('qq_get_main_menu')).text).sessions[0].unread, 1);
+});
+
+test('real bridge captures account-bound requests and global relationship actions work from menu', async t => {
+  const h = await fixture(t, { relationships: { enabled: true }, tools: { relationships: true } });
+  const calls = [];
+  h.bot.request = async (action, params) => {
+    calls.push({ action, params });
+    return { status: 'ok', retcode: 0, data: action === 'get_login_info' ? { user_id: 100 } : {} };
+  };
+  await h.receive(); await h.unifiedDriver.tick();
+  const event = { self_id: 100, post_type: 'request', request_type: 'friend', user_id: 201, flag: 'fixture-flag', comment: 'hello' };
+  await h.bot.emitRequest('friend', event);
+  await h.bot.emitRequest('friend', event);
+  await h.bot.emitRequest('friend', { ...event, self_id: 999, flag: 'other-account' });
+  const list = JSON.parse((await h.call('qq_list_friend_requests')).text);
+  assert.equal(list.total, 1);
+  assert.equal(JSON.stringify(list).includes('fixture-flag'), false);
+  const args = { requestId: list.requests[0].id };
+  assert.equal(JSON.parse((await h.call('qq_accept_friend_request', args, 'accept-1')).text).status, 'succeeded');
+  await h.call('qq_accept_friend_request', args, 'accept-1');
+  assert.equal(calls.filter(x => x.action === 'set_friend_add_request').length, 1);
+  assert.equal(JSON.parse((await h.call('qq_get_current_session')).text), null);
+  assert.equal(JSON.stringify(h.cfg.allow).includes('201'), false);
+  await h.receive('private:123', 2, '/permission v1');
+  assert.equal((await h.call('qq_delete_friend', { userId: '201' }, 'delete-1')).error, true);
+  assert.equal(calls.some(x => x.action === 'delete_friend'), false);
+});
+
+test('bridge native callback authorizes only the active scoped grant and never the main token', async t => {
+  let endpoint, captured, calls = 0, callbackError;
+  const authorize = async (input, token) => {
+    const response = await fetch(`${endpoint}/api/unified/relationships/native-authorize`, { method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-console-token': 'fixture-console-token', 'x-unified-native-grant': token },
+      body: JSON.stringify(input) });
+    return response.status;
+  };
+  const h = await fixture(t, { relationships: { enabled: true, actions: { nativeFriendRequest: true } }, tools: { relationships: true } }, {
+    nativeFriendRequest: async options => {
+      try {
+      calls++; options.assertAllowed();
+      assert.equal(options.expectedAccount, '100');
+      captured = { input: { ...options.input, key: options.key }, token: options.agentToken };
+      assert.equal(await authorize(captured.input, captured.token), 200);
+      assert.equal(await authorize({ ...captured.input, userId: '999' }, captured.token), 403);
+      assert.equal(await authorize(null, captured.token), 400);
+      h.cfg.socialV2.relationships.actions.nativeFriendRequest = false;
+      assert.equal(await authorize(captured.input, captured.token), 403);
+      h.cfg.socialV2.relationships.actions.nativeFriendRequest = true;
+      return { status: 'succeeded' };
+      } catch (error) { callbackError = error; throw error; }
+    },
+  });
+  const server = h.startConsoleServer(h.cfg);
+  h.bot.request = async () => ({ status: 'ok', retcode: 0, data: { user_id: 100 } });
+  if (!server.listening) await new Promise(r => server.once('listening', r));
+  t.after(() => new Promise(r => server.close(r)));
+  endpoint = `http://127.0.0.1:${server.address().port}`;
+  await h.receive(); await h.unifiedDriver.tick();
+  const result = JSON.parse((await h.call('qq_request_friend', { userId: '201', groupId: '456', answer: 'hello' }, 'native-1')).text);
+  if (callbackError) throw callbackError;
+  assert.equal(result.status, 'succeeded'); assert.equal(calls, 1);
+  assert.equal(await authorize(captured.input, captured.token), 403);
+  const main = JSON.parse(fs.readFileSync(path.join(h.temp, 'state/unified-mcp.json')));
+  assert.notEqual(main.token, captured.token);
+  assert.equal(await authorize(captured.input, main.token), 403);
+});
+
+test('real bridge exposes workspace tools only through global v3 and honors silent mode', async t => {
+  const h = await fixture(t, {}, { workspaceServer: () => ({ command: 'fixture-node', script: 'fixture-server', roots: [h.temp] }) });
+  await h.receive(); await h.unifiedDriver.tick();
+  const args = { operation: 'list_allowed_directories' };
+  assert.equal(JSON.parse((await h.call('qq_workspace_file', args, 'roots-1')).text).status, 'succeeded');
+  await h.receive('private:123', 2, '/permission v2');
+  assert.equal((await h.call('qq_workspace_file', args, 'roots-2')).error, true);
+  await h.receive('private:123', 3, '/permission v3');
+  // The role state is a trusted host file, never supplied by a tool caller.
+  const roleFile = path.join(h.temp, 'state', 'current-role.json');
+  fs.writeFileSync(roleFile, JSON.stringify({ mode: 'silent' }));
+  assert.equal((await h.call('qq_workspace_file', args, 'roots-3')).error, true);
 });
 
 test('pause/offline retain input and do not create or prompt a model', async t => {

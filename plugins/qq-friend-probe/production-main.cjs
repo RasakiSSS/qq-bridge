@@ -39,8 +39,12 @@ function launch() {
   async function authorize(input) {
     try {
       const cfg = bridgeConfig(), token = cfg.consoleToken || fs.readFileSync(path.join(c.bridgeDir, 'state', 'console-token'), 'utf8').trim();
-      const r = await json('http://127.0.0.1:' + (cfg.consolePort || 3100) + '/api/socialV2/relationships/native-authorize',
-        { key: input.key }, { 'x-console-token': token, 'x-agent-call': '1', 'x-agent-token': input.agentToken });
+      const unified = /^unified:[1-9]\d{0,19}$/.test(input.key);
+      const r = await json('http://127.0.0.1:' + (cfg.consolePort || 3100)
+        + (unified ? '/api/unified/relationships/native-authorize' : '/api/socialV2/relationships/native-authorize'),
+        unified ? { key: input.key, userId: input.userId, groupId: input.groupId, answer: input.answer, operationId: input.operationId } : { key: input.key },
+        unified ? { 'x-console-token': token, 'x-unified-native-grant': input.agentToken }
+          : { 'x-console-token': token, 'x-agent-call': '1', 'x-agent-token': input.agentToken });
       return r.ok === true && !stopped;
     } catch { return false; }
   }

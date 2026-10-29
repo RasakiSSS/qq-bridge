@@ -31,6 +31,7 @@ export function createUnifiedBridgeDriver({ createHost, ready, log = () => {}, i
   return {
     async ingest(input) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.ingest(input); },
     async wakeConfig(key) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.wakeConfig(key); },
+    async friendRequest(event) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.friendRequest(event); },
     async fromQQ(...args) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.fromQQ(...args); },
     async fromConsole(...args) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.fromConsole(...args); },
     async onDshFrame(frame) {

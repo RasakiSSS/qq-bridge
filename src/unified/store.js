@@ -29,7 +29,7 @@ export class UnifiedStore {
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
       const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
       if ((id !== 0 && id !== APPLICATION_ID) || (id === 0 && (tables.length || version !== 0))
-          || (id === APPLICATION_ID && ![1, 2, 3].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
+          || (id === APPLICATION_ID && ![1, 2, 3, 4].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;');
       if (id === 0) this.transaction(() => this.db.exec(`
         CREATE TABLE accounts (
@@ -113,6 +113,14 @@ export class UnifiedStore {
       `));
       this.db.prepare('SELECT account,since_seq,started FROM attention_waits LIMIT 0').all();
       this.db.prepare('SELECT account,scene,token,due_at,event_seq FROM wake_timers LIMIT 0').all();
+      if (version < 4) this.transaction(() => this.db.exec(`
+        CREATE TABLE friend_requests (
+          account TEXT NOT NULL REFERENCES accounts(account), id TEXT NOT NULL, payload TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','failed','unknown')),
+          created INTEGER NOT NULL, PRIMARY KEY(account,id));
+        PRAGMA user_version=4;
+      `));
+      this.db.prepare('SELECT account,id,payload,status,created FROM friend_requests LIMIT 0').all();
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     } catch (error) { this.db.close(); throw error; }
   }

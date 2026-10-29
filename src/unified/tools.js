@@ -9,7 +9,28 @@ const handle = z.string().min(1).max(128);
 const limit = z.number().int().min(1).max(100).optional();
 const qzoneText = { capability: handle, content: z.string().trim().min(1).max(2000),
   mentions: z.array(z.string().regex(/^[1-9]\d{0,19}$/)).max(100).optional() };
+const qqId = z.string().regex(/^[1-9]\d{0,15}$/);
+const reason = z.string().max(200).optional();
+const requestRef = { requestId: z.string().regex(/^[a-f0-9]{64}$/), reason };
+const relationTools = { qq_accept_friend_request: 'accept_request', qq_reject_friend_request: 'reject_request',
+  qq_delete_friend: 'delete_friend', qq_leave_group: 'leave_group', qq_request_friend: 'request_friend' };
 const definitions = {
+  qq_workspace_file: ['全局 v3 受限工作区文件工具，在菜单也能使用。root 默认为 0，path/paths 必须相对此根；仅填写 operation 对应参数。读取文本可用 head 或 tail 分批。只有可信 owner 私聊/控制台要求或你自主决定时使用；普通人的文件要求明确拒绝。未知写入结果不可换调用重试。', {
+    operation: z.enum(['read_text_file', 'read_multiple_files', 'list_directory', 'list_directory_with_sizes', 'directory_tree', 'search_files', 'get_file_info', 'list_allowed_directories', 'create_directory', 'write_file', 'edit_file']),
+    root: z.number().int().min(0).max(20).optional(), path: z.string().min(1).max(1000).optional(),
+    paths: z.array(z.string().min(1).max(1000)).min(1).max(10).optional(),
+    content: z.string().max(16000).optional(), head: z.number().int().min(1).max(1000).optional(), tail: z.number().int().min(1).max(1000).optional(),
+    sortBy: z.enum(['name', 'size']).optional(), pattern: z.string().min(1).max(200).optional(),
+    excludePatterns: z.array(z.string().max(200)).max(20).optional(),
+    edits: z.array(z.object({ oldText: z.string().min(1).max(8000), newText: z.string().max(8000) }).strict()).min(1).max(20).optional(),
+    dryRun: z.boolean().optional(),
+  }],
+  qq_list_friend_requests: ['查看当前机器人账号已记录的待处理申请。全局 v2，在菜单也可使用；旧的未确认账号记录不会混入。', { limit }],
+  qq_accept_friend_request: ['接受待处理申请；只使用列表返回的 requestId。不会自动加入聊天白名单。需要全局 v2。', requestRef],
+  qq_reject_friend_request: ['拒绝待处理申请。需要全局 v2；结果 unknown 时不要换调用重试。', requestRef],
+  qq_delete_friend: ['删除指定好友，可在菜单使用，需要全局 v2；不会删除历史或重置主会话。', { userId: qqId, block: z.boolean().optional(), reason }],
+  qq_leave_group: ['退出指定群聊，可在菜单使用，需要全局 v2；不会删除历史或重置主会话。', { groupId: qqId, reason }],
+  qq_request_friend: ['通过已验证的共同群来源申请加好友，需要全局 v2 及本机原生服务。成功表示申请已提交，不表示已经成为好友。', { userId: qqId, groupId: qqId, answer: z.string().max(500) }],
   qq_get_main_menu: ['查看当前可见聊天的真实未读数；skipReceipt 用于明确略过该快照。', { after: z.string().max(128).optional(), limit }],
   qq_get_current_session: ['查看当前场景及有效场景凭证；没有进入时返回 null。', {}],
   qq_join_session: ['进入群聊、私聊或空间。峰期禁止新进入普通场景，失败保留原场景。', { key }],
@@ -63,6 +84,7 @@ export function unifiedToolCatalog() {
 }
 const digest = (token) => createHash('sha256').update(token).digest();
 const toolFlags = {
+  qq_list_friend_requests: 'relationships', ...Object.fromEntries(Object.keys(relationTools).map(name => [name, 'relationships'])),
   qq_get_unread_msg: 'getUnread', qq_mark_read: 'markRead', qq_send_message: 'sendMessage',
   qq_wait_for_events: 'waitMessages', qq_wait_for_messages: 'waitMessages', qq_set_wake_config: 'setWakeConfig',
   qq_qzone_publish: 'qzonePublish', qq_qzone_comment: 'qzoneComment', qq_qzone_reply: 'qzoneComment',
@@ -74,8 +96,9 @@ const toolFlags = {
 export class UnifiedTools {
   #credential;
   #tail = Promise.resolve();
-  constructor({ scenes, actions, attention, toolAllowed = () => true }) {
+  constructor({ scenes, actions, attention, relationships, toolAllowed = () => true }) {
     this.scenes = scenes; this.actions = actions; this.attention = attention; this.toolAllowed = toolAllowed;
+    this.relationships = relationships;
   }
   #checkTool(name) { if (toolFlags[name] && this.toolAllowed(toolFlags[name]) !== true) throw fail('TOOL_DENIED'); }
   #binding() {
@@ -126,7 +149,19 @@ export class UnifiedTools {
     const result = this.#tail.then(async () => {
       check();
       const a = parsed.data;
+      if (relationTools[name]) {
+        if (!this.actions) throw fail('ACTION_DENIED');
+        this.authenticate(token, execution?.sessionId);
+        return this.actions.run({ operation: `relationship:${relationTools[name]}`, callId: execution?.callId, payload: a, checkCaller: check });
+      }
       switch (name) {
+        case 'qq_workspace_file':
+          if (!this.actions) throw fail('ACTION_DENIED');
+          this.authenticate(token, execution?.sessionId);
+          return this.actions.run({ operation: 'workspaceFile', callId: execution?.callId, payload: a, checkCaller: check });
+        case 'qq_list_friend_requests':
+          if (!this.relationships) throw fail('ACTION_DENIED');
+          return this.relationships.list(a.limit);
         case 'qq_get_main_menu': return this.scenes.menu(a);
         case 'qq_get_current_session': return this.scenes.current();
         case 'qq_join_session': return this.scenes.join(a.key, check);
@@ -159,6 +194,8 @@ export class UnifiedTools {
 }
 
 const errors = new Set(['UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
+  'FILES_UNAVAILABLE', 'FILE_PATH_DENIED',
+  'REQUEST_UNAVAILABLE',
   'ACTION_DENIED', 'ACTION_ID_CONFLICT', 'INVALID_CALL_ID',
   'PERMISSION_DENIED', 'STALE_SCENE', 'SCENE_DENIED', 'IDENTITY_CHANGED',
   'INVALID_RECEIPT', 'RECEIPT_NOT_DELIVERED', 'PEAK_SCENE_ENTRY_BLOCKED']);

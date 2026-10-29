@@ -15,9 +15,10 @@ export function resolveNativeFriendUid({ homeDir, accountUin, userId, groupId })
   } finally { db.close(); }
 }
 
-export async function nativeFriendRequest({ configFile, input, key, agentToken, assertAllowed, fetchImpl = fetch }) {
+export async function nativeFriendRequest({ configFile, input, key, agentToken, expectedAccount, assertAllowed, fetchImpl = fetch }) {
   assertAllowed();
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  if (expectedAccount != null && String(config.expectedUin) !== String(expectedAccount)) throw new Error('主动好友服务账号不匹配');
   const endpoint = JSON.parse(fs.readFileSync(path.join(config.reportDir, 'service.json'), 'utf8'));
   if (config.mode !== 'production' || config.enabled !== true || !endpoint.active
     || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535

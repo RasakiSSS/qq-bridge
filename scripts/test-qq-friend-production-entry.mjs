@@ -17,7 +17,15 @@ function fixture(options = {}) {
     fetch: async (url, init) => {
       const action = url.split('/').at(-1); calls.push(action);
       if (action === 'native-authorize') {
-        assert.equal(init.headers['x-agent-token'], 'agent-secret'); authCount++;
+        if (options.unified) {
+          assert.ok(url.endsWith('/api/unified/relationships/native-authorize'));
+          assert.equal(init.headers['x-unified-native-grant'], 'b'.repeat(64));
+          assert.equal(init.headers['x-agent-token'], undefined);
+          assert.equal(init.headers['x-console-token'], 'console-secret');
+          assert.deepEqual(JSON.parse(init.body), { key: 'unified:123456789', userId: input.userId,
+            groupId: input.groupId, answer: input.answer, operationId: input.operationId });
+        } else assert.equal(init.headers['x-agent-token'], 'agent-secret');
+        authCount++;
         return { ok: true, json: async () => ({ ok: !(options.revoke && authCount > 1) }) };
       }
       assert.equal(init.headers.authorization, 'Bearer onebot-secret');
@@ -71,4 +79,13 @@ test('production entry rechecks bridge authorization and account before native i
   assert.equal((await f.request(input)).result.nativeInvoked, false); f.stop();
   const g = fixture({ wrongAccount: true }); g.binder.onBuddyBinding({});
   assert.equal((await g.request(input)).code, 500); g.stop();
+});
+
+test('production entry uses scoped unified grants and rechecks revocation before sending', async () => {
+  for (const revoke of [false, true]) {
+    const f = fixture({ unified: true, revoke }); f.binder.onBuddyBinding({});
+    assert.equal((await f.request({ ...input, key: 'unified:123456789', agentToken: 'b'.repeat(64) })).result.nativeInvoked, !revoke);
+    assert.equal(f.writes.join('').includes('b'.repeat(64)), false);
+    f.stop();
+  }
 });
