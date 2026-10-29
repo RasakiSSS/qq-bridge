@@ -7,9 +7,12 @@ const identifier = value => typeof value === 'string' && /^[\w:.-]{1,256}$/.test
 
 // Explicitly started by the host; importing this module does not open a port.
 // No cookies, browser origins, arbitrary interfaces, or unauthenticated discovery.
-export async function startUnifiedMcpHttp({ tools, port = 0, dispatch = (token, name, args) => tools.call(token, name, args) }) {
+export async function startUnifiedMcpHttp({ tools, port = 0, dispatch = (token, name, args, identity) => tools.call(token, name, args, identity) }) {
+  let closing = false, closePromise;
+  const activeCalls = new Set();
   const server = createServer(async (req, res) => {
     const reject = status => { res.writeHead(status, { 'content-type': 'text/plain' }); res.end('Request rejected'); };
+    if (closing) return reject(503);
     const address = server.address();
     if (req.headers.host !== `127.0.0.1:${address.port}` || req.headers.origin || req.url !== '/mcp') return reject(403);
     if (req.method !== 'POST') return reject(405);
@@ -37,7 +40,14 @@ export async function startUnifiedMcpHttp({ tools, port = 0, dispatch = (token, 
       tools.authenticate(token, sessionId);
       const identity = meta?.[IDENTITY_META];
       if (!identity || identity.sessionId !== sessionId || !identifier(identity.callId)) throw new Error('Invalid identity');
-      return dispatch(token, name, args, { sessionId, callId: identity.callId });
+      const call = Promise.resolve().then(() => {
+        if (closing) throw new Error('Closing');
+        tools.authenticate(token, sessionId);
+        return dispatch(token, name, args, { sessionId, callId: identity.callId });
+      });
+      activeCalls.add(call);
+      void call.finally(() => activeCalls.delete(call)).catch(() => {});
+      return call;
     } });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.once('close', () => { void mcp.close().catch(() => {}); });
@@ -51,6 +61,15 @@ export async function startUnifiedMcpHttp({ tools, port = 0, dispatch = (token, 
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   return {
     endpoint: `http://127.0.0.1:${server.address().port}/mcp`,
-    close: () => new Promise((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeIdleConnections(); }),
+    close: () => {
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        await new Promise((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeIdleConnections(); });
+        // A disconnected HTTP client does not prove its host operation ended.
+        await Promise.allSettled([...activeCalls]);
+      })();
+      return closePromise;
+    },
   };
 }

@@ -144,3 +144,28 @@ node --test --test-reporter=dot scripts/test-unified-foundation.mjs scripts/test
 完整相关回归 **159 项通过**，新增 6 项覆盖真实回环 MCP、连接器身份传递、取消、主/子会话隔离、吊销、无凭据发现、Origin/Host、请求体预算、静态错误和预设守卫。测试仅使用临时 SQLite、模拟 DSH execution 与回环 HTTP；尚未在真实 DSH 加载新预设，也未发送 QQ。
 
 下一步：完成宿主凭据发布器与生命周期，将 runtime/transport 接入 bridge 的显式统一模式开关，并隔离旧模式调度；接真实动作处理器、管理入口、等待/睡眠、总结、空间通知与历史导入。六工具通信已通，不能将其描述为全功能单 session 已上线。
+
+## 2026-10-29 宿主生命周期与发送链路交接
+
+开工基线 `27796da`，备份 `codex/backup-unified-host-20261029`。本节覆盖前一节已完成项，尚未启动生产统一模式。用户修改的人格源文件及个人角色文件仍未纳入提交。额度从剩余 58% 开始，最后阶段剩余约 25%，预留交接空间，不使用重置权益。
+
+### 本次完成
+
+- `UnifiedMainBinding`：固定宿主路径、当前安装实例所有权回调、文件工具排除回调、目录及文件权限检查；临时文件先为空，权限确认后才写入 secret，fsync 后原子替换。拒绝硬链接、异常路径和非回环 endpoint。清理只删除属于自己 publisher 的绑定。允许取代旧文件的前提是宿主已验证整个安装实例独占，不能仅凭某个账号的 SQLite owner 锁宣称拥有固定绑定文件。
+- `startUnifiedHost`：组合 runtime、MCP listener、凭据发布器；不自动 tick/restore、改模式或发送消息。关闭先拒绝新工作、撤销工具凭据，等所有运行方法及 MCP 内部操作结束，再清理自己的绑定、释放数据库 owner。HTTP 客户端断开不代表动作结束；有专项测试覆盖。失去安装所有权时不擅自删除可能属于后继实例的文件，关闭会报告失败，旧 token 已撤销。
+- `qq_send_message` 成为第七个主工具，只能持当前场景凭证发送到群聊或私聊，不接收模型填写目标。它使用可信 DSH callId 进入持久动作账本；重复调用返回原回执，参数冲突拒绝，断线/异常保留 unknown，不换 ID 自动补发。普通发送不推进已读。动作执行增加 caller 复核，在异步 prepare 后和最终写入 guard 中均可检测 bearer 撤销。
+- `createUnifiedSendHandler` 只组合宿主 prepare/send 回调，**不直接调用 OneBot**。真实回调仍须保留原有工具开关、白名单、静默、敏感信息过滤、审计、限频预占、引用归属、共同发送队列及发送记录，并在每条实际发送前调用 assertCurrent。生产 `bridge.js` 尚未注册这些回调，不要把模拟发送通过描述成 QQ 实发成功。
+- 本机 DSH 0.2.1-rc.2 的 schema 校验器不接受 pattern/minLength/maxLength/minimum/maximum/minItems/maxItems。已将 DSH 展示 schema 转为支持的子集，并保留约束说明；MCP 执行仍使用原始严格 Zod 校验。已用安装版真实校验器验过全部输入/输出 schema，不是只用 stub register 接受对象。主预设继续保留“开发中”。
+
+### 验证与限制
+
+完整相关回归 **174 项通过**：原 159，加宿主/绑定/发送 12、安装版 schema 2、断开客户端关闭 1。全部仅为临时数据、模拟 DSH 执行上下文、回环 HTTP 和模拟发送；没有真实 QQ/DSH 请求，没有生产凭据文件或监听，没有修改 ACL。ACL 测试注入检查/加固函数，真实 Windows 权限及真实 DSH preset 加载仍需后续隔离验证。
+
+运行命令是在原 159 项组合后加入 `scripts/test-unified-host.mjs` 和 `scripts/test-unified-plugin-contract.mjs`；`scripts/test-unified-mcp-http.mjs` 已增加断线关闭用例。新源文件应通过 node --check、git diff --check。远端继续仅推送脱敏导出分支，生产 main 历史禁止直接 push。
+
+### 下一次直接从这里继续
+
+1. **生产 bridge 接线是首要未完成项。** 现有安装锁在 `bridge.js` 的 `acquireLock` 附近（搜索 `LOCK_FILE`），统一 host 的 `assertInstallationOwner` 必须验证真实安装独占与旧自动调度已停；固定凭据路径不能被多个账号 host 同时使用。还需保证 workspace 文件工具不能触达 `state/unified-mcp.json` 及临时文件。不要用恒返回 true 的回调接生产。
+2. 复用 `/api/socialV2/send-message` 内既有检查与 `sendMessagesV2`/`onebotSend` 共享队列。当前旧发送链没有接受统一场景最终 guard；必须在队列等待和每条实际写入前补入统一 assertCurrent，保留旧检查，不能通过伪造旧 per-chat token 回调旧 HTTP 路由。`onebotSend` 已承担发送后共同记忆记录，避免重复记录。
+3. 主运行驱动还缺 OneBot 入站持久化与唤醒判断、DSH 帧转交、定时 tick、手动暂停、管理命令/控制台，以及旧模式定时器/黑话/记忆/空间模型入口的统一互斥。主菜单消息和当前场景等待/有限睡眠尚未实现。
+4. 后续接文件、关系、空间、记忆/总结 worker、旧记录导入与回滚演练。旧预设及现有生产功能没有改动，不要通过打开开发中 preset 直接切生产；完整人格衔接也尚未完成。

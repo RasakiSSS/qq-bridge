@@ -12,7 +12,8 @@ export class UnifiedActions {
   constructor({ store, scenes, handlers, now = Date.now }) {
     this.store = store; this.scenes = scenes; this.handlers = handlers; this.now = now;
   }
-  async run({ callId, operation, capability, payload }) {
+  async run({ callId, operation, capability, payload, checkCaller = () => {} }) {
+    checkCaller();
     if (typeof callId !== 'string' || !callId || callId.length > 256) throw fail('INVALID_CALL_ID');
     if (!Object.hasOwn(this.handlers, operation)) throw fail('ACTION_DENIED');
     const handler = this.handlers[operation];
@@ -23,6 +24,7 @@ export class UnifiedActions {
     const input = JSON.parse(json(payload));
     const context = this.scenes.context();
     const authorize = () => {
+      checkCaller();
       const ctx = this.scenes.context();
       const state = this.scenes.active(ctx, handler.level);
       if (ctx.account !== context.account || ctx.ownerQQ !== context.ownerQQ || ctx.identityEpoch !== context.identityEpoch) throw fail('IDENTITY_CHANGED');

@@ -32,10 +32,10 @@ export class UnifiedRuntime {
       this.api = api;
       this.bindMainTools = bindMainTools;
       this.scenes = new UnifiedScenes({ store: this.store, getContext: ownedContext, isAllowed, now, prepare: prepareScene });
-      this.tools = new UnifiedTools({ scenes: this.scenes });
       this.evidence = new UnifiedDshEvidence({ store: this.store });
       this.dsh = new UnifiedDshSession({ store: this.store, scenes: this.scenes, api, workspaceId, readWorkspaces });
       this.actions = new UnifiedActions({ store: this.store, scenes: this.scenes, handlers, now });
+      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions });
       this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, now });
       this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now,
         ensureSession: async identity => {

@@ -14,11 +14,28 @@ const definitions = {
   qq_quit_session: ['退出当前场景并返回主菜单。峰期退出后不能重新进入普通场景。', {}],
   qq_get_unread_msg: ['读取当前场景原文，默认一批 30 条；不会自动标记已读。', { capability: handle, limit }],
   qq_mark_read: ['确认已读或明确略过回执中的消息；不会清除回执之后到达的消息。', { receipt: handle }],
+  qq_send_message: ['向已进入的群聊或私聊发送消息。结果 unknown 表示无法确认，禁止换一个调用重复发送；不会自动标记已读。', {
+    capability: handle, messages: z.array(z.string().min(1).max(16384)).min(1).max(100),
+    replyToMessageId: z.string().regex(/^-?[1-9]\d{0,19}$/).optional(),
+    atUserId: z.string().regex(/^[1-9]\d{0,19}$/).optional(),
+  }],
 };
 const schemas = Object.fromEntries(Object.entries(definitions).map(([name, [, shape]]) => [name, z.object(shape).strict()]));
+// DSH 0.2 ToolRuntime accepts a smaller schema vocabulary than MCP/Zod.
+// Shape is advertised there; all pattern/size/range checks still run here at
+// the authenticated execution boundary. Never relax the actual Zod schemas.
+function dshSchema(schema) {
+  const { $schema, pattern, minLength, maxLength, minimum, maximum, minItems, maxItems, ...result } = schema;
+  const constraints = { pattern, minLength, maxLength, minimum, maximum, minItems, maxItems };
+  const details = Object.entries(constraints).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`);
+  if (details.length) result.description = [result.description, `桥接执行约束：${details.join('；')}`].filter(Boolean).join('。');
+  if (result.properties) result.properties = Object.fromEntries(Object.entries(result.properties).map(([key, value]) => [key, dshSchema(value)]));
+  if (result.items) result.items = dshSchema(result.items);
+  return result;
+}
 export function unifiedToolCatalog() {
   return Object.entries(definitions).map(([name, [description]]) => {
-    const { $schema, ...parameters } = z.toJSONSchema(schemas[name]);
+    const parameters = dshSchema(z.toJSONSchema(schemas[name]));
     return { name, description, parameters };
   });
 }
@@ -30,7 +47,7 @@ const digest = (token) => createHash('sha256').update(token).digest();
 export class UnifiedTools {
   #credential;
   #tail = Promise.resolve();
-  constructor({ scenes }) { this.scenes = scenes; }
+  constructor({ scenes, actions }) { this.scenes = scenes; this.actions = actions; }
   #binding() {
     const ctx = this.scenes.context();
     const sessionId = this.scenes.store.account(ctx.account).session_id;
@@ -62,7 +79,7 @@ export class UnifiedTools {
     this.scenes.active();
     return credential;
   }
-  call(token, name, args = {}) {
+  call(token, name, args = {}, execution) {
     // Authenticate at admission AND execution; a queued call may be revoked.
     let credential, parsed;
     try {
@@ -84,6 +101,12 @@ export class UnifiedTools {
         case 'qq_quit_session': return this.scenes.quit(check);
         case 'qq_get_unread_msg': return this.scenes.read(a.capability, a.limit);
         case 'qq_mark_read': return this.scenes.markRead(a.receipt);
+        case 'qq_send_message': {
+          if (!this.actions) throw fail('ACTION_DENIED');
+          this.authenticate(token, execution?.sessionId);
+          const { capability, ...payload } = a;
+          return this.actions.run({ operation: 'sendMessage', callId: execution?.callId, capability, payload, checkCaller: check });
+        }
       }
     });
     this.#tail = result.catch(() => {});
@@ -92,6 +115,7 @@ export class UnifiedTools {
 }
 
 const errors = new Set(['UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
+  'ACTION_DENIED', 'ACTION_ID_CONFLICT', 'INVALID_CALL_ID',
   'PERMISSION_DENIED', 'STALE_SCENE', 'SCENE_DENIED', 'IDENTITY_CHANGED',
   'INVALID_RECEIPT', 'RECEIPT_NOT_DELIVERED', 'PEAK_SCENE_ENTRY_BLOCKED']);
 

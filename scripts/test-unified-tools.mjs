@@ -24,7 +24,7 @@ test('only issued main bearer can access tools; identity claims in arguments can
     await assert.rejects(f.tools.call(token, 'qq_get_main_menu', { ownerQQ: '200', sessionId: 'main-1' }), { code: 'UNAUTHORIZED' });
   }
   await assert.rejects(f.call('qq_get_main_menu', { ownerQQ: '200' }), { code: 'INVALID_ARGUMENTS' });
-  for (const name of ['setPermission', 'setPaused', 'saveSummary', 'confirm', 'qq_send_message', '__proto__']) {
+  for (const name of ['setPermission', 'setPaused', 'saveSummary', 'confirm', '__proto__']) {
     await assert.rejects(f.call(name), { code: 'TOOL_DENIED' });
   }
 });
@@ -76,7 +76,7 @@ test('peak entry and hidden menu apply equally through authenticated tools', asy
   assert.equal((await f.call('qq_join_session', { key: 'private:200' })).key, 'private:200');
 });
 
-test('real MCP list/call transport exposes only six tools, keeps credentials out of schemas and errors', async t => {
+test('real MCP list/call transport exposes only registered tools, keeps credentials out of schemas and errors', async t => {
   const f = fixture(t);
   const server = createUnifiedMcpServer({ dispatch: (name, args) => f.call(name, args) });
   const client = new Client({ name: 'test', version: '1' });
@@ -84,7 +84,7 @@ test('real MCP list/call transport exposes only six tools, keeps credentials out
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(a); await client.connect(b);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 6);
+  assert.equal(list.tools.length, 7);
   assert.ok(!JSON.stringify(list).includes(f.token));
   assert.ok(!JSON.stringify(list).includes('ownerQQ'));
   const joined = await client.callTool({ name: 'qq_join_session', arguments: { key: 'group:1' } });

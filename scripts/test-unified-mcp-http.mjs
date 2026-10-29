@@ -11,14 +11,15 @@ import { apply as guard } from '../plugins/qq-agent-presets/qq-unified-guard.mjs
 import { readFileSync } from 'node:fs';
 import { renderPatch, patchFileFor } from './build-agent-preset-patches.mjs';
 
-async function fixture(t) {
+async function fixture(t, beforeDispatch = async () => {}) {
   const store = new UnifiedStore();
   store.account('100');
   store.db.prepare("UPDATE accounts SET session_id='main-1'").run();
   const scenes = new UnifiedScenes({ store, getContext: () => ({ account: '100', ownerQQ: '200', identityEpoch: 1, enabled: true }), isAllowed: () => true });
   const tools = new UnifiedTools({ scenes });
   const token = tools.issueMainCredential(), calls = [];
-  const http = await startUnifiedMcpHttp({ tools, dispatch: (token, name, args, identity) => {
+  const http = await startUnifiedMcpHttp({ tools, dispatch: async (token, name, args, identity) => {
+    await beforeDispatch();
     calls.push(identity); return tools.call(token, name, args);
   } });
   t.after(async () => { await http.close(); store.close(); });
@@ -34,6 +35,21 @@ test('unified guard denies legacy bypass tools, files, subagents and invented na
   for (const name of ['qq_get_main_menu', 'qq_join_session', 'compress', 'decompress', 'search_context', 'acp_status']) assert.equal(check({ name }), undefined);
   for (const name of ['mcp__snowluma__qq_send_message', 'mcp__filesystem__read_file', 'subagent', 'read', 'qq_set_permission', 'qq_unified_arbitrary', undefined]) assert.equal(check({ name }), 'UNIFIED_TOOL_DENIED');
   assert.equal(readFileSync(patchFileFor('qq-unified'), 'utf8'), renderPatch('qq-unified'));
+});
+
+test('HTTP close waits for a host call even after its client disconnects', async t => {
+  let release, entered;
+  const gate = new Promise(resolve => release = resolve), entry = new Promise(resolve => entered = resolve);
+  const f = await fixture(t, async () => { entered(); await gate; });
+  const controller = new AbortController();
+  const requestPromise = fetch(f.http.endpoint, { method: 'POST', headers: f.headers, signal: controller.signal,
+    body: JSON.stringify(request({ [IDENTITY_META]: { sessionId: 'main-1', callId: 'disconnect-test' } })) });
+  const rejected = assert.rejects(requestPromise);
+  await entry; controller.abort(); await rejected;
+  let closed = false; const closing = f.http.close().then(() => closed = true);
+  await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(closed, false);
+  release(); await closing;
+  assert.equal(f.calls.length, 1);
 });
 
 test('DSH connector takes execution identity from runtime and never from arguments', async t => {
@@ -56,7 +72,7 @@ test('DSH connector takes execution identity from runtime and never from argumen
 test('DSH registrations share MCP schemas without model-facing authentication fields', () => {
   const definitions = [];
   apply({ tools: { register: definition => definitions.push(definition) } });
-  assert.equal(definitions.length, 6);
+  assert.equal(definitions.length, 7);
   const join = definitions.find(item => item.name === 'qq_join_session');
   assert.deepEqual(join.parameters.required, ['key']);
   assert.equal(join.parameters.additionalProperties, false);
@@ -69,7 +85,7 @@ test('real HTTP MCP carries stable execution ID separately from JSON-RPC request
   const client = new Client({ name: 'fixture', version: '1' });
   await client.connect(new StreamableHTTPClientTransport(new URL(f.http.endpoint), { requestInit: { headers: f.headers } }));
   try {
-    assert.equal((await client.listTools()).tools.length, 6);
+    assert.equal((await client.listTools()).tools.length, 7);
     for (let i = 0; i < 2; i++) {
       const result = await client.callTool({ name: 'qq_get_main_menu', arguments: {}, _meta: { [IDENTITY_META]: { sessionId: 'main-1', callId: 'call-stable' } } });
       assert.deepEqual(JSON.parse(result.content[0].text), { sessions: [], hasMore: false });
