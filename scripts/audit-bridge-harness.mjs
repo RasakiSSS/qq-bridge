@@ -142,6 +142,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
     unifiedDriver, handleUnifiedIncoming, unifiedContext, pollUnifiedQzone,
+    saveState, saveSocialV2State, saveInitialPrompts,
+    setStateWritableForTest(value) { stateWritable = value; },
+    setInitialPromptsWritableForTest(value) { initialPromptsWritable = value; },
     setConnected(value) { snowlumaHealth.connected = value; },
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,

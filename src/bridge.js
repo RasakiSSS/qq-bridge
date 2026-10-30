@@ -192,12 +192,18 @@ function renameWithRetry(from, to, attempts = 4) {
 }
 
 // 原子写 JSON 文件：先写唯一临时文件再 rename，避免进程中断写坏配置，也避免固定临时名被并发/符号链接攻击利用。
-function atomicWriteJson(file, obj) {
+function atomicWriteJson(file, obj, { durable = false } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+    const content = JSON.stringify(obj, null, 2) + '\n';
+    if (durable) {
+      const fd = fs.openSync(tmp, 'wx', 0o600);
+      try { fs.writeFileSync(fd, content, 'utf8'); fs.fsyncSync(fd); }
+      finally { fs.closeSync(fd); }
+    } else fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
     renameWithRetry(tmp, file);
+    if (durable && fs.readFileSync(file, 'utf8') !== content) throw Object.assign(new Error('状态文件写入后核验不一致'), { code: 'STATE_WRITE_VERIFY_FAILED' });
   } catch (error) {
     // 失败时别把随机名临时文件留在 state/ 里当垃圾。
     try { fs.unlinkSync(tmp); } catch {}
@@ -1055,11 +1061,15 @@ function loadState() {
   else state = { sessions: {} };
   if (!state.sessionPolicies || typeof state.sessionPolicies !== 'object' || Array.isArray(state.sessionPolicies)) state.sessionPolicies = {};
 }
-function saveState() {
+function saveState({ strict = false } = {}) {
   // 统一走原子写：固定 `.tmp` 名 + 无 mode 的手写版本会在外部进程（杀软/备份）
   // 占住 sessions.json.tmp 时抛 EPERM，且写出的文件权限与其它 state 文件不一致。
-  if (!stateWritable) return; // 见 loadState：读失败/损坏时绝不回写，避免把丢失变成永久
-  atomicWriteJson(STATE_FILE, state);
+  if (!stateWritable) {
+    if (strict) throw Object.assign(new Error('会话映射处于只读降级状态'), { code: 'STATE_READ_ONLY' });
+    return; // 见 loadState：读失败/损坏时绝不回写
+  }
+  atomicWriteJson(STATE_FILE, state, { durable: strict });
+  if (strict) return true;
 }
 
 // ── 单实例锁 ─────────────────────────────────────────────────────────────────
@@ -8562,6 +8572,9 @@ async function main() {
     conversations: new Map(), // key -> state
     paused: false, // 控制台可暂停整个二代 AI 活动（停止唤醒/等待）
   };
+  // Maintenance must not flush a fallback assembled after a failed source load.
+  // Normal legacy save behavior stays unchanged until maintenance is enabled.
+  let socialV2StrictSourceValid = false;
 
   // 自动休眠是额外的投递闸门，绝不改写人工 paused 或 AI 的 WakeConfig。
   const peakSleepSuspendedKeys = new Set();
@@ -8899,6 +8912,8 @@ async function main() {
   }
 
   function loadSocialV2State() {
+    socialV2StrictSourceValid = false;
+    let sourceMissing = false;
     try {
       // 记下读取时刻的文件指纹。加载末尾会统一落盘一次（为了让 ensureWakeableV2
       // 中途的改动不丢），但如果这期间**别的进程**已经写过这个文件，我们手上的
@@ -8913,13 +8928,18 @@ async function main() {
           return null;
         }
       })();
+      try { fs.statSync(SOCIAL_V2_FILE); } catch (error) { sourceMissing = error?.code === 'ENOENT'; }
       const raw = readJsonSafe(SOCIAL_V2_FILE, null);
+      socialV2StrictSourceValid = sourceMissing ? raw === null && !fs.existsSync(SOCIAL_V2_FILE)
+        : !!(raw && !Array.isArray(raw) && raw.conversations
+          && typeof raw.conversations === 'object' && !Array.isArray(raw.conversations));
       socialV2.paused = raw?.paused === true;
       if (raw && typeof raw.conversations === 'object') {
         const seenTokens = new Set();
         for (const [key, val] of Object.entries(raw.conversations)) {
-          if (!val || typeof val !== 'object') continue;
-          if (!/^(group|private):\d+$/.test(key)) continue;
+          if (!val || typeof val !== 'object') { socialV2StrictSourceValid = false; continue; }
+          if (Array.isArray(val)) socialV2StrictSourceValid = false;
+          if (!/^(group|private):\d+$/.test(key)) { socialV2StrictSourceValid = false; continue; }
           const defaultWc = defaultWakeConfigV2();
           let agentToken = String(val.agentToken || crypto.randomBytes(16).toString('hex'));
           if (!agentToken || seenTokens.has(agentToken)) {
@@ -9013,17 +9033,20 @@ async function main() {
           }
         })();
         if (fileStamp !== null && nowStamp !== null && fileStamp !== nowStamp) {
+          socialV2StrictSourceValid = false;
           log('⚠️ state/social-v2.json 在本次加载期间被其它进程改写，跳过回写以免覆盖更新的状态（是否误开了第二个桥接实例？）');
         } else {
           saveSocialV2State();
         }
       }
     } catch (error) {
+      socialV2StrictSourceValid = false;
       log('读取 socialV2 状态失败:', error?.message ?? error);
     }
   }
 
-  function saveSocialV2State() {
+  function saveSocialV2State({ strict = false } = {}) {
+    if (strict && !socialV2StrictSourceValid) throw Object.assign(new Error('二代源状态未完整加载，不能用于维护保存'), { code: 'STATE_SOURCE_UNVERIFIED' });
     try {
       const obj = { paused: socialV2.paused, conversations: Object.create(null) };
       for (const [key, st] of socialV2.conversations) {
@@ -9052,8 +9075,10 @@ async function main() {
           seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
         };
       }
-      atomicWriteJson(SOCIAL_V2_FILE, obj);
+      atomicWriteJson(SOCIAL_V2_FILE, obj, { durable: strict });
+      if (strict) return true;
     } catch (error) {
+      if (strict) throw error;
       log('保存 socialV2 状态失败:', error?.message ?? error);
     }
   }
@@ -9133,8 +9158,9 @@ async function main() {
     if (initialPrompts.size) log(`已加载 ${initialPrompts.size} 条会话初始提示词`);
   }
 
-  function saveInitialPrompts() {
+  function saveInitialPrompts({ strict = false } = {}) {
     if (!initialPromptsWritable) {
+      if (strict) throw Object.assign(new Error('初始提示词处于只读降级状态'), { code: 'STATE_READ_ONLY' });
       log('⚠️ initial-prompts.json 处于只读降级状态，本次修改不会落盘');
       return false;
     }
@@ -9143,9 +9169,10 @@ async function main() {
       for (const [key, entry] of initialPrompts) {
         obj[key] = { text: entry.text, createdAt: entry.createdAt || 0, updatedAt: entry.updatedAt || 0 };
       }
-      atomicWriteJson(INITIAL_PROMPTS_FILE, obj);
+      atomicWriteJson(INITIAL_PROMPTS_FILE, obj, { durable: strict });
       return true;
     } catch (error) {
+      if (strict) throw error;
       log('保存会话初始提示词失败:', error?.message ?? error);
       return false;
     }
