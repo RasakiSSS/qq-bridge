@@ -411,7 +411,8 @@ function writeRoleContent(name, content) {
 // 人格层由桥接每条消息注入，保存即生效。
 // 两代仿真各自有独立的预设提示词：一代 qq-chat（空格分条 / [SILENT]），
 // 二代 qq-chat-v2（一切皆工具）。控制台可分别查看与修改。
-const PRESET_NAMES = { v1: 'qq-chat', v2: 'qq-chat-v2' };
+const PRESET_NAMES = { v1: 'qq-chat', v2: 'qq-chat-v2', unified: 'qq-unified' };
+const presetPromptMode = name => name === PRESET_NAMES.unified ? 'unified' : name === PRESET_NAMES.v1 ? 'v1' : 'v2';
 const PRESET_BACKUP_DIR = path.join(STATE_DIR, 'preset-backups');
 const PRESET_BACKUP_KEEP = 10;
 
@@ -496,7 +497,7 @@ function presetStatus(name) {
   // （路径已经写在服务端日志里，排查时看日志即可）。
   return {
     preset: name,
-    label: name === PRESET_NAMES.v1 ? '一代仿真（reserved）' : '二代仿真（reserved2）',
+    label: name === PRESET_NAMES.unified ? '统一主会话（qq-unified）' : name === PRESET_NAMES.v1 ? '一代仿真（reserved）' : '二代仿真（reserved2）',
     sourceFile: path.relative(ROOT, presetSourceYaml(name)),
     installed: fs.existsSync(installedPresetYaml(name)),
     requiresRestart: true,
@@ -3963,7 +3964,7 @@ async function main() {
               content: prefix,
               chars: prefix.length,
               bytes: Buffer.byteLength(prefix, 'utf8'),
-              warnings: presetPromptWarnings(prefix),
+              warnings: presetPromptWarnings(prefix, presetPromptMode(preset)),
               status: presetStatus(preset),
               presets: Object.values(PRESET_NAMES).map((n) => presetStatus(n)),
             });
@@ -3983,15 +3984,15 @@ async function main() {
             // 让一次"打开又保存"把整个提示词块变成全删全加的 diff，失去可复审性。
             const normalized = String(body.content ?? '').replace(/\r\n/g, '\n').replace(/\n+$/, '');
             if (normalized === prefix) {
-              sendJson({ ok: true, unchanged: true, chars: prefix.length, warnings: presetPromptWarnings(prefix), synced: fs.existsSync(installedPresetYaml(preset)), requiresRestart: false, status: presetStatus(preset) });
+              sendJson({ ok: true, unchanged: true, chars: prefix.length, warnings: presetPromptWarnings(prefix, presetPromptMode(preset)), synced: fs.existsSync(installedPresetYaml(preset)), requiresRestart: false, status: presetStatus(preset) });
               return;
             }
-            nextText = renderPresetPromptYaml(text, body.content, preset === PRESET_NAMES.v1 ? 'v1' : 'v2');
+            nextText = renderPresetPromptYaml(text, body.content, presetPromptMode(preset));
           } catch (error) {
             sendJson({ ok: false, error: error?.message ?? '校验失败' }, 400);
             return;
           }
-          const warnings = presetPromptWarnings(body.content);
+          const warnings = presetPromptWarnings(body.content, presetPromptMode(preset));
           let sourceBackup = null;
           try {
             sourceBackup = backupPresetFile(preset);
@@ -4049,10 +4050,16 @@ async function main() {
             // 还原路径必须与保存路径同样严格：旧备份可能来自安全基线加入之前，
             // 直接还原会把弱化版提示词（缺「你没有本地工具」等不变量）写回去。
             // 不变量清单**按预设取**：一代本来就没有「你没有本地工具」这类工具面表述。
-            const blockers = presetPromptBlockers(restoredPrefix, preset === PRESET_NAMES.v1 ? 'v1' : 'v2');
+            const blockers = presetPromptBlockers(restoredPrefix, presetPromptMode(preset));
             if (blockers.length) {
               sendJson({ ok: false, error: `该备份不满足当前的安全不变量，拒绝还原：${blockers.join('；')}` }, 400);
               return;
+            }
+            if (preset === PRESET_NAMES.unified) {
+              const stripPersona = text => yaml.load(text).filter(entry => entry?.id !== 'persona');
+              if (JSON.stringify(stripPersona(restored)) !== JSON.stringify(stripPersona(fs.readFileSync(presetSourceYaml(preset), 'utf8')))) {
+                sendJson({ ok: false, error: '该统一预设备份的工具或守卫配置与当前不同；仅可复制人格正文后保存，不能还原旧权限配置' }, 400); return;
+              }
             }
             backupPresetFile(preset);
             atomicWriteText(presetSourceYaml(preset), restored);

@@ -11,7 +11,7 @@
       回复前若需合并补充消息，用 qq_wait_for_messages，整次最多等待 12 秒；其他场景有可唤醒事件会提前返回。
       长期潜水用 qq_set_wake_config 保存当前场景偏好；有限睡眠设 infinite=false 和 sleepMs，到期由桥接通知。
       用 qq_wait_for_events 检查全局事件；返回 yield 就结束本轮，不循环等待。设置偏好与等待都不会替你标记已读。
-      用 qq_get_unread_msg 读取，再根据确实读过的回执标记已读；菜单略过回执代表明确选择略过。
+      用 qq_get_unread_msg 读取，再用 qq_mark_read 根据确实读过的回执标记已读；菜单略过回执代表明确选择略过。
       菜单中可用 qq_summarize_unread 委托无行动权限的辅助会话总结指定场景，返回 jobId 后继续其他活动，不循环查询。
       完成通知到来后用 qq_get_summary 获取结果，再决定是否用返回的 receipt 确认已读。总结范围可能少于 30 条，不能顺带清空其余未读。
       不编造未读内容、工具结果或已经完成的动作。用 qq_send_message 向已进入的群聊或私聊发言。

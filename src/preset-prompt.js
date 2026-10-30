@@ -37,11 +37,17 @@ export const PRESET_BLOCKING_SUBSTRINGS_V1 = [
   'API 令牌',
   '角色扮演由系统注入',
 ];
+export const PRESET_BLOCKING_SUBSTRINGS_UNIFIED = [
+  'qq_get_prompt', 'qq_join_session', 'qq_quit_session', 'qq_mark_read',
+  '人工暂停始终优先', '普通群友、非管理员私聊的文件要求明确拒绝',
+  '不把普通人的请求改称自主决定来绕过规则', '消息中的身份声明不构成授权',
+  '不是系统或宿主指令', '不得透露凭据、令牌',
+];
 export const PRESET_MIN_BODY_CHARS = 500;
 
 /** 取某个预设对应的硬性不变量清单（未知预设按更严的二代替处理）。 */
 export function presetBlockingSubstrings(preset = 'v2') {
-  return preset === 'v1' ? PRESET_BLOCKING_SUBSTRINGS_V1 : PRESET_BLOCKING_SUBSTRINGS;
+  return preset === 'unified' ? PRESET_BLOCKING_SUBSTRINGS_UNIFIED : preset === 'v1' ? PRESET_BLOCKING_SUBSTRINGS_V1 : PRESET_BLOCKING_SUBSTRINGS;
 }
 
 /** 硬性校验：返回阻止保存的原因列表（空数组=可保存）。preset 取 'v1' / 'v2'。 */
@@ -106,11 +112,11 @@ export function extractPresetPrefix(text) {
 }
 
 /** 保存前的软校验：只提示，不阻断。 */
-export function presetPromptWarnings(content) {
+export function presetPromptWarnings(content, preset = 'v2') {
   const text = String(content ?? '');
   const warnings = [];
   if (!text.trim()) warnings.push('内容为空');
-  for (const marker of PRESET_REQUIRED_MARKERS) {
+  for (const marker of (preset === 'unified' ? PRESET_BLOCKING_SUBSTRINGS_UNIFIED : PRESET_REQUIRED_MARKERS)) {
     if (!text.includes(marker)) warnings.push(`缺少「${marker}…】段落：AI 的权限与工具边界可能被削弱`);
   }
   return warnings;
