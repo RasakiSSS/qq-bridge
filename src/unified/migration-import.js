@@ -3,11 +3,11 @@ import { projectLegacyQzone } from './migration-qzone.js';
 
 // Host-only offline import. Must not be exposed to model tools or run against an
 // active installation. The source staging database and old files remain intact.
-export function importStagedMigration({ store, stage, account, assertExclusive, now = Date.now(), checkpoint = () => {} }) {
+export function importStagedMigration({ store, stage, account, assertExclusive, now = Date.now(), checkpoint = () => {}, retainDeltas = false }) {
   accountId(account);
   const check = () => { if (typeof assertExclusive !== 'function' || assertExclusive() !== true) throw fail('MIGRATION_EXCLUSIVE_REQUIRED'); };
   check();
-  const input = stage.exportForImport(account);
+  const input = retainDeltas === true ? stage.exportBaseForImport(account) : stage.exportForImport(account);
   if (input.batch.account !== account || !/^[a-f0-9]{64}$/.test(input.batch.snapshot)) throw fail('MIGRATION_ACCOUNT_UNVERIFIED');
   if (!Number.isSafeInteger(now)) throw fail('INVALID_CLOCK');
   return store.transaction(() => {

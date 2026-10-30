@@ -9,7 +9,39 @@ import { UnifiedStore } from '../src/unified/store.js';
 import { UnifiedScenes } from '../src/unified/scenes.js';
 import { UnifiedAttention } from '../src/unified/attention.js';
 import { importStagedMigration } from '../src/unified/migration-import.js';
+import { importMigrationDeltas } from '../src/unified/migration-delta.js';
 import { MigrationStage } from '../src/unified/migration-stage.js';
+
+test('delta overlap with legacy preview blocks whole batch instead of overriding read state or text', async t => {
+  const f = await fixture(t); f.stage.importSnapshot(f.handle);
+  const store = new UnifiedStore(path.join(f.root, 'overlap.sqlite'));
+  try {
+    const opts = { store, stage: f.stage, account: '100', assertExclusive: () => true };
+    importStagedMigration(opts);
+    f.stage.appendDelta('100', { scene: 'group:1', sourceId: 'new-first', kind: 'message', at: 1001, payload: { text: 'complete' } });
+    f.stage.appendDelta('100', { scene: 'group:1', sourceId: 'original-id', kind: 'message', at: 1002, payload: { text: 'preview longer original' } });
+    assert.throws(() => importMigrationDeltas(opts), { code: 'MIGRATION_DELTA_REQUIRES_RECONCILIATION' });
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, 1);
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM migration_preserved WHERE category LIKE 'delta:%'").get().n, 0);
+  } finally { store.close(); }
+});
+
+test('new own posts stay read but new comments unread, and lease loss rolls back all deltas', async t => {
+  const f = await fixture(t); f.stage.importSnapshot(f.handle);
+  const store = new UnifiedStore(path.join(f.root, 'delta-space.sqlite'));
+  try {
+    let exclusive = true;
+    const opts = { store, stage: f.stage, account: '100', assertExclusive: () => exclusive };
+    importStagedMigration(opts);
+    f.stage.appendDelta('100', { scene: 'qzone', sourceId: 'post:100:own', kind: 'qzone-feed', at: 1001, payload: { text: 'own', authorQQ: '100' } });
+    f.stage.appendDelta('100', { scene: 'qzone', sourceId: '["100","own","","1"]', kind: 'qzone-comment', at: 1002, payload: { text: 'new comment', ownerQQ: '100', authorQQ: '200' } });
+    assert.throws(() => importMigrationDeltas({ ...opts, checkpoint() { exclusive = false; } }), { code: 'MIGRATION_EXCLUSIVE_REQUIRED' });
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE scene='qzone'").get().n, 0);
+    exclusive = true; assert.equal(importMigrationDeltas(opts).imported, 2);
+    const rows = store.db.prepare("SELECT kind,unread,wake FROM events WHERE scene='qzone' ORDER BY seq").all();
+    assert.deepEqual(rows.map(row => row.unread), [0, 1]); assert.ok(rows.every(row => !row.wake));
+  } finally { store.close(); }
+});
 
 test('Qzone import preserves exact read evidence and unknown replies without waking or enabling runtime', async t => {
   const f = await fixture(t), q = f.qzone.accounts['100'];

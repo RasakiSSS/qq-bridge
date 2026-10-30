@@ -164,6 +164,13 @@ export function snapshotJson(handle, name) {
   return bytes === null ? null : JSON.parse(bytes.toString('utf8'));
 }
 
+// Host-only attestation metadata, without config, tokens or file contents.
+export function snapshotIdentity(handle) {
+  const data = verified.get(handle);
+  if (!data) throw fail('MIGRATION_SNAPSHOT_UNVERIFIED');
+  return { account: data.manifest.account, epoch: data.manifest.epoch, provenance: data.manifest.provenance };
+}
+
 // Fixed source mapping; explicit absent files are part of the digest. This is a
 // reader only: the caller still needs the capture lease and account provenance.
 export function readLegacySnapshotFiles(root) {

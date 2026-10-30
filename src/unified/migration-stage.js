@@ -127,6 +127,27 @@ export class MigrationStage {
       return true;
     });
   }
+  exportDeltas(account) {
+    accountId(account);
+    return this.transaction(() => {
+      const batch = this.db.prepare('SELECT * FROM batches WHERE account=?').get(account);
+      if (!batch) throw fail('MIGRATION_SNAPSHOT_REQUIRED');
+      return { batch, events: this.db.prepare('SELECT * FROM delta_events WHERE account=? ORDER BY at,scene,source_id,kind').all(account),
+        actions: this.db.prepare('SELECT * FROM delta_actions WHERE account=? ORDER BY id').all(account) };
+    });
+  }
+  // Snapshot import and delta import are separate transactions. Callers may
+  // explicitly request the base while retaining deltas for the next phase.
+  exportBaseForImport(account) {
+    accountId(account);
+    return this.transaction(() => {
+      const batch = this.db.prepare('SELECT * FROM batches WHERE account=?').get(account);
+      if (!batch) throw fail('MIGRATION_SNAPSHOT_REQUIRED');
+      return { batch, messages: this.db.prepare('SELECT * FROM messages WHERE account=? ORDER BY scene,legacy_seq').all(account),
+        scenes: this.db.prepare('SELECT * FROM scenes WHERE account=? ORDER BY scene').all(account),
+        preserved: this.db.prepare('SELECT * FROM preserved WHERE account=? ORDER BY category').all(account) };
+    });
+  }
   action(account, id, status) {
     accountId(account);
     if (typeof id !== 'string' || !id || !['succeeded', 'rejected', 'unknown'].includes(status)) throw fail('MIGRATION_INVALID_SOURCE');
