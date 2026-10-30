@@ -300,6 +300,34 @@ test('main Qzone actions preserve friends visibility, limit, mentions, exact cal
   assert.equal(writes.length, 3);
 });
 
+test('on-demand Qzone refresh shares inbox dedupe, keeps reads explicit and requires a live Qzone scene', async t => {
+  const h = await fixture(t, { qzone: { enabled: true } });
+  let reads = 0;
+  h.bot.request = async action => {
+    if (action === 'get_login_info') return { status: 'ok', retcode: 0, data: { user_id: 100 } };
+    if (action === 'get_qzone_feeds') { reads++; return { status: 'ok', retcode: 0, data: { feeds: [{ uin: 999, key: 'post', appid: 311, html: 'hello', time: Date.now() / 1000 }] } }; }
+    if (action === 'get_qzone_msg_list') return { status: 'ok', retcode: 0, data: { msglist: [] } };
+    if (action === 'get_qzone_msg_detail') return { status: 'ok', retcode: 0, data: { tid: 'post', comments: [], comment_num: 0 } };
+    assert.fail('No writes allowed: ' + action);
+  };
+  await h.receive(); await h.unifiedDriver.tick();
+  const cap = JSON.parse((await h.call('qq_join_session', { key: 'qzone' })).text);
+  const args = { capability: cap.capability };
+  const status = JSON.parse((await h.call('qq_qzone_status', args, 'status')).text);
+  assert.equal(status.status, 'succeeded'); assert.equal(reads, 0);
+  assert.equal(status.result.pendingFeeds, undefined); assert.equal(status.result.lastError, undefined);
+  await h.call('qq_qzone_refresh', args, 'refresh'); assert.equal(reads, 1);
+  await h.call('qq_qzone_refresh', args, 'refresh'); assert.equal(reads, 1);
+  const page = JSON.parse((await h.call('qq_get_unread_msg', args)).text);
+  assert.equal(page.messages.length, 1);
+  await h.call('qq_mark_read', { receipt: page.receipt });
+  await h.call('qq_qzone_refresh', args, 'refresh-again'); assert.equal(reads, 2);
+  assert.equal(JSON.parse((await h.call('qq_get_unread_msg', args)).text).messages.length, 0);
+  await h.call('qq_quit_session');
+  assert.equal((await h.call('qq_qzone_refresh', args, 'stale')).error, true);
+  assert.equal(reads, 2); assert.equal(h.calls.created.length, 1);
+});
+
 test('Qzone uncertain network write remains unknown and is never retried under same tool call', async t => {
   const h = await fixture(t, { qzone: { enabled: true } }); await h.receive(); await h.unifiedDriver.tick();
   let writes = 0;

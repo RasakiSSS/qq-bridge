@@ -400,14 +400,14 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
   // Unified mode uses collection only. This path never calls decide, performs
   // writes to QQ, marks comments read, or advances the autonomous model timer.
   // Delivery must persist before resolving; retries offer the same source keys.
-  async function collect(context, deliver) {
+  async function collect(context, deliver, { force = false } = {}) {
     if (typeof deliver !== 'function') throw fail('空间事件投递器未配置');
     if (!enabled() || polling || now() < retryAt || readOnly) return { status: 'idle' };
     check(context, 'read'); polling = true;
     try {
       return await serial(async () => {
         const { qq, data: a } = await account(context);
-        if (now() < (a.nextEventAt || 0)) return { status: 'idle' };
+        if (!force && now() < (a.nextEventAt || 0)) return { status: 'idle' };
         await browse(qq, a, context);
         await confirmAccount(qq, context, 'read');
         let delivered = 0;

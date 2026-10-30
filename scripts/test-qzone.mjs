@@ -59,6 +59,22 @@ test('default disabled; selected publishing defaults and valid decision formats'
   assert.throws(() => parseQzoneDecision('{"post":null,"replies":[{}]}'));
 });
 
+test('forced collection bypasses event interval but preserves failure backoff and manual pause', async t => {
+  const f = fixture(t), deliver = async () => {};
+  assert.equal((await f.service.collect(null, deliver)).status, 'collected');
+  assert.equal((await f.service.collect(null, deliver)).status, 'idle');
+  assert.equal((await f.service.collect(null, deliver, { force: true })).status, 'collected');
+  f.override(action => { if (action === 'get_login_info') throw Error('offline'); });
+  await assert.rejects(f.service.collect(null, deliver, { force: true }));
+  const count = f.calls.length;
+  assert.equal((await f.service.collect(null, deliver, { force: true })).status, 'idle');
+  assert.equal(f.calls.length, count);
+  f.override(null); f.tick(); f.block(true);
+  await assert.rejects(f.service.collect(null, deliver, { force: true }), /paused/);
+  assert.equal(f.decisions.length, 0);
+  assert.equal(f.calls.some(x => ['send_qzone_msg', 'comment_qzone'].includes(x.action)), false);
+});
+
 test('unified collection never calls a model or sends QQ, keeps own feeds read and comments unacknowledged', async t => {
   const f = fixture(t), delivered = [];
   f.feeds.push({ uin: 1, key: 'own', appid: 311, time: f.now() / 1000, html: 'my post' });

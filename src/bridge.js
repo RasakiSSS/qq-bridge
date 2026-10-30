@@ -1635,6 +1635,19 @@ async function main() {
         unifiedQzoneActions.add(context);
         try {
           context.authorize();
+          if (method === 'status' || method === 'refresh') {
+            const collected = method === 'refresh' ? await qzoneService.collect(context, async input => {
+              context.authorize();
+              await deliverUnifiedQzone(input);
+              context.authorize();
+            }, { force: true }) : undefined;
+            const status = await qzoneService.status(context);
+            context.authorize();
+            // Do not expose old snapshot previews, raw gateway errors or write
+            // records. Content is read through the unified inbox and receipts.
+            return { status: 'succeeded', result: { accountQQ: status.accountQQ,
+              budget: status.budget, commentSupport: status.commentSupport, ...(collected ? { collection: collected } : {}) } };
+          }
           const args = method === 'publish' ? [payload.content, context, payload.mentions]
             : [method === 'reply' ? payload.commentKey : payload.postKey, payload.content, context, payload.mentions];
           const result = await qzoneService[method](...args);
@@ -1647,6 +1660,12 @@ async function main() {
         } finally { unifiedQzoneActions.delete(context); }
       },
     };
+  }
+
+  async function deliverUnifiedQzone(input) {
+    if (unifiedQzoneClosing || input.accountQQ !== selfUserId || unifiedLoginPending || !snowlumaHealth.connected) throw new Error('空间账号连接已变化');
+    const { accountQQ, sourceId, ...event } = input;
+    await unifiedDriver.ingest({ ...event, key: 'qzone', sourceId: crypto.createHash('sha256').update(sourceId).digest('hex') });
   }
 
   // ── 表情包体系（二代仿真）本地知识库 ────────────────────────────────────
@@ -12300,6 +12319,7 @@ async function main() {
             authenticateQQ: (connection, event) => connection === bot && snowlumaHealth.connected && String(event.self_id) === account,
             authenticateConsole: request => unifiedConsoleRequests.has(request),
             handlers: { sendMessage: sender, qzonePublish: unifiedQzoneHandler('publish'),
+              qzoneStatus: unifiedQzoneHandler('status'), qzoneRefresh: unifiedQzoneHandler('refresh'),
               qzoneComment: unifiedQzoneHandler('comment'), qzoneReply: unifiedQzoneHandler('reply') },
           },
         });
@@ -12322,11 +12342,7 @@ async function main() {
     let collectionErrorNoted = false;
     pollUnifiedQzone = () => {
       if (unifiedQzoneClosing || unifiedQzonePoll) return unifiedQzonePoll;
-      unifiedQzonePoll = qzoneService.collect(unifiedQzoneCollection, async input => {
-        if (unifiedQzoneClosing || input.accountQQ !== selfUserId || unifiedLoginPending || !snowlumaHealth.connected) throw new Error('空间账号连接已变化');
-        const { accountQQ, sourceId, ...event } = input;
-        await unifiedDriver.ingest({ ...event, key: 'qzone', sourceId: crypto.createHash('sha256').update(sourceId).digest('hex') });
-      }).then(result => { collectionErrorNoted = false; return result; }).catch(() => {
+      unifiedQzonePoll = qzoneService.collect(unifiedQzoneCollection, deliverUnifiedQzone).then(result => { collectionErrorNoted = false; return result; }).catch(() => {
         if (!collectionErrorNoted && !unifiedQzoneClosing) log('[unified] 空间采集暂不可用，原记录保留；不会启动独立空间会话');
         collectionErrorNoted = true;
       }).finally(() => { unifiedQzonePoll = null; });

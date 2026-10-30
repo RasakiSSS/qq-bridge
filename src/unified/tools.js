@@ -15,6 +15,8 @@ const requestRef = { requestId: z.string().regex(/^[a-f0-9]{64}$/), reason };
 const relationTools = { qq_accept_friend_request: 'accept_request', qq_reject_friend_request: 'reject_request',
   qq_delete_friend: 'delete_friend', qq_leave_group: 'leave_group', qq_request_friend: 'request_friend' };
 const definitions = {
+  qq_qzone_status: ['查看已进入空间的发说说额度、间隔和评论支持情况，不读取或标记动态。', { capability: handle }],
+  qq_qzone_refresh: ['按需浏览已配置的好友首页和指定 QQ，将新动态与评论加入统一收件箱；不会发送、标记已读或创建空间会话。idle 表示正在采集或失败退避，不要循环重试。之后用 qq_get_unread_msg 分批读取。', { capability: handle }],
   qq_workspace_file: ['全局 v3 受限工作区文件工具，在菜单也能使用。root 默认为 0，path/paths 必须相对此根；仅填写 operation 对应参数。读取文本可用 head 或 tail 分批。只有可信 owner 私聊/控制台要求或你自主决定时使用；普通人的文件要求明确拒绝。未知写入结果不可换调用重试。', {
     operation: z.enum(['read_text_file', 'read_multiple_files', 'list_directory', 'list_directory_with_sizes', 'directory_tree', 'search_files', 'get_file_info', 'list_allowed_directories', 'create_directory', 'write_file', 'edit_file']),
     root: z.number().int().min(0).max(20).optional(), path: z.string().min(1).max(1000).optional(),
@@ -84,6 +86,7 @@ export function unifiedToolCatalog() {
 }
 const digest = (token) => createHash('sha256').update(token).digest();
 const toolFlags = {
+  qq_qzone_status: 'qzoneRead', qq_qzone_refresh: 'qzoneRead',
   qq_list_friend_requests: 'relationships', ...Object.fromEntries(Object.keys(relationTools).map(name => [name, 'relationships'])),
   qq_get_unread_msg: 'getUnread', qq_mark_read: 'markRead', qq_send_message: 'sendMessage',
   qq_wait_for_events: 'waitMessages', qq_wait_for_messages: 'waitMessages', qq_set_wake_config: 'setWakeConfig',
@@ -175,6 +178,8 @@ export class UnifiedTools {
           if (!this.attention) throw fail('TOOL_DENIED');
           return this.attention.waitMessages(a, check);
         case 'qq_set_wake_config':
+        case 'qq_qzone_status':
+        case 'qq_qzone_refresh':
         case 'qq_qzone_publish':
         case 'qq_qzone_comment':
         case 'qq_qzone_reply':
@@ -183,6 +188,7 @@ export class UnifiedTools {
           this.authenticate(token, execution?.sessionId);
           const { capability, ...payload } = a;
           const operation = ({ qq_send_message: 'sendMessage', qq_set_wake_config: 'setWakeConfig',
+            qq_qzone_status: 'qzoneStatus', qq_qzone_refresh: 'qzoneRefresh',
             qq_qzone_publish: 'qzonePublish', qq_qzone_comment: 'qzoneComment', qq_qzone_reply: 'qzoneReply' })[name];
           return this.actions.run({ operation, callId: execution?.callId, capability, payload, checkCaller: check });
         }

@@ -72,7 +72,7 @@ test('DSH connector takes execution identity from runtime and never from argumen
 test('DSH registrations share MCP schemas without model-facing authentication fields', () => {
   const definitions = [];
   apply({ tools: { register: definition => definitions.push(definition) } });
-  assert.equal(definitions.length, 20);
+  assert.equal(definitions.length, 22);
   const join = definitions.find(item => item.name === 'qq_join_session');
   assert.deepEqual(join.parameters.required, ['key']);
   assert.equal(join.parameters.additionalProperties, false);
@@ -85,7 +85,7 @@ test('real HTTP MCP carries stable execution ID separately from JSON-RPC request
   const client = new Client({ name: 'fixture', version: '1' });
   await client.connect(new StreamableHTTPClientTransport(new URL(f.http.endpoint), { requestInit: { headers: f.headers } }));
   try {
-    assert.equal((await client.listTools()).tools.length, 20);
+    assert.equal((await client.listTools()).tools.length, 22);
     for (let i = 0; i < 2; i++) {
       const result = await client.callTool({ name: 'qq_get_main_menu', arguments: {}, _meta: { [IDENTITY_META]: { sessionId: 'main-1', callId: 'call-stable' } } });
       assert.deepEqual(JSON.parse(result.content[0].text), { sessions: [], hasMore: false });
