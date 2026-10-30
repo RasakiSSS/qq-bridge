@@ -424,8 +424,18 @@ test('status does not lazily open host and console snapshot does not expose main
   const server = h.startConsoleServer();
   if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
   try {
-    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/status`, { headers: { 'x-console-token': 'fixture-console-token' } });
-    const status = await response.json();
+    // Windows can assign a port forbidden by Fetch's browser-oriented list.
+    // This local HTTP server test should not depend on that random allocation.
+    const status = await new Promise((resolve, reject) => {
+      http.get({ hostname: '127.0.0.1', port: server.address().port, path: '/api/status',
+        headers: { 'x-console-token': 'fixture-console-token' } }, response => {
+        let body = ''; response.setEncoding('utf8');
+        response.on('data', chunk => { body += chunk; }); response.on('error', reject);
+        response.on('end', () => {
+          try { assert.equal(response.statusCode, 200); resolve(JSON.parse(body)); } catch (error) { reject(error); }
+        });
+      }).on('error', reject);
+    });
     assert.equal(status.unified.enabled, true); assert.equal(status.unified.counts.unread, 1);
     assert.equal(status.unified.dispatch, 'accepted');
     const credential = JSON.parse(fs.readFileSync(path.join(h.temp, 'state/unified-mcp.json')));

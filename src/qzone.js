@@ -72,6 +72,7 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
     }
   } catch { readOnly = true; log('[qzone] 空间状态读取失败，已停止空间任务并保留原文件'); }
   let chain = Promise.resolve();
+  let maintenance = false;
   let polling = false;
   let retryAt = 0;
   let activeAccount = '';
@@ -94,12 +95,16 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
     try { observeMemory(activeAccount, state.accounts[activeAccount]); } catch { log('[qzone] 本轮记忆记录未完成，空间发送状态保留'); }
   }
   function check(context, action) {
+    if (maintenance && action === 'model') throw fail('空间处于迁移维护中', 503);
     if (readOnly) throw fail('空间状态读取或保存失败，已停止任务', 503);
     if (!enabled()) throw fail('QQ 空间功能已关闭', 403);
     assertAllowed(context, action);
   }
   function serial(fn) {
-    const run = chain.then(fn);
+    const run = chain.then(() => {
+      if (maintenance) throw fail('空间处于迁移维护中', 503);
+      return fn();
+    });
     chain = run.catch(() => {});
     return run;
   }
@@ -346,7 +351,7 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
     }
   }
   async function run() {
-    if (!enabled() || polling || now() < retryAt || readOnly) return;
+    if (maintenance || !enabled() || polling || now() < retryAt || readOnly) return;
     try { check(null, 'read'); } catch { return; }
     polling = true;
     try {
@@ -402,7 +407,7 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
   // Delivery must persist before resolving; retries offer the same source keys.
   async function collect(context, deliver, { force = false } = {}) {
     if (typeof deliver !== 'function') throw fail('空间事件投递器未配置');
-    if (!enabled() || polling || now() < retryAt || readOnly) return { status: 'idle' };
+    if (maintenance || !enabled() || polling || now() < retryAt || readOnly) return { status: 'idle' };
     check(context, 'read'); polling = true;
     try {
       return await serial(async () => {
@@ -438,6 +443,41 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
     } finally { polling = false; }
   }
   return {
+    // Host-only: not routed through QQ tools or the console. Releasing the
+    // lease does not resume operations; activation/rollback must decide that.
+    async quiesceForMigration({ assertExclusive } = {}) {
+      const check = () => {
+        if (typeof assertExclusive !== 'function' || assertExclusive() !== true) throw fail('空间维护独占状态不可验证', 503);
+        if (readOnly) throw fail('空间状态不可用于迁移保存', 503);
+      };
+      check(); maintenance = true;
+      await chain;
+      check();
+      let released = false;
+      const assert = () => { check(); if (released || !maintenance) throw fail('空间维护租约不可用', 503); return true; };
+      return {
+        assert,
+        flush() {
+          assert();
+          // Do not call save(): it also records memory, which belongs to a
+          // separately drained source. This flush has no network/model work.
+          const content = JSON.stringify(state, null, 2);
+          const temp = `${file}.${crypto.randomUUID()}.migration.tmp`;
+          try {
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            const fd = fs.openSync(temp, 'wx', 0o600);
+            try { fs.writeFileSync(fd, content, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+            assert(); fs.renameSync(temp, file);
+            if (fs.readFileSync(file, 'utf8') !== content) throw fail('空间维护写后核验失败', 503);
+            assert(); return true;
+          } catch (error) {
+            try { fs.unlinkSync(temp); } catch {}
+            throw error;
+          }
+        },
+        release() { released = true; },
+      };
+    },
     run,
     collect,
     status: (context) => serial(async () => { const { qq, data } = await account(context); return snapshot(qq, data); }),

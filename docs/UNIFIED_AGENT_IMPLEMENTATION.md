@@ -434,3 +434,15 @@ createMigrationBarrier.acquire 现在有贯穿整个获取过程的单一单调�
 验证：完整统一/空间/关系/记忆相关组合 **374项通过**（state/probes/unified-strict-flush-full-tests.log）；旧安全回归 **26项通过**（unified-strict-flush-legacy-tests.log），test-hardening 通过。最后对缺失源判定加固，严格保存4项复跑通过（unified-strict-flush-final.log）。node --check 和 git diff --check 通过。生产文件没有被测试读取或写入。
 
 下一步继续宿主维护接线。严格保存目前只覆盖 sessions/social-v2/initial-prompts，并未构成所有源文件的组合 flush；空间、角色/预设、config端点自愈、DSH回帧、各后台任务的停稳与持久状态仍需纳入。没有新增空泛的 acquire 生产路由，也不能把 strict保存成功视为安装已停稳。真实独占、可信旧账号归属、原始收件稳定ID/时间、原文恢复、增量回滚、已读反向映射和显式激活仍未完成；其他统一模式旧待办不变。
+
+## 2026-10-31 空间服务停稳与严格保存
+
+从92e8851继续，备份codex/backup-unified-qzone-quiesce-20261031。新增空间服务宿主专用quiesceForMigration，未映射到模型工具或控制台路由，生产未调用。停稳标记同步设定，排队/新操作不再进入串行处理，已进入操作完成后才给租约；浏览中开始维护会拦住后续model阶段。背景run/collect停稳后空闲返回，不反复刷失败日志。
+
+租约要求宿主独占断言，flush使用独占随机临时文件、fsync、rename及完整读回核验，成功才返回true。flush不调用observeMemory，不进行网络/模型操作；损坏或只读源拒绝保存。release只使租约失效，不清维护标记，不恢复调度。调用方仍需通过总维护期限等待，未新增自动解冻入口。该接口只协调空间服务自己串行队列，不能证明整个bridge已停稳。
+
+完整相关回归378项通过，日志state/probes/unified-qzone-quiesce-full-tests.log；语法和diff检查通过。新用例覆盖在途等待、排队拒绝、迟到浏览不调用模型、后台空闲、独占丢失、损坏原件及flush无额外记忆/网络副作用。生产和用户人格/角色未改。
+
+下一步将空间租约与桥接严格保存组合进宿主维护协调，继续处理入口完整性、原始收件、可信账号归属和真实独占；尚未开放生产迁移。其他未完成事项按前述交接推进。
+
+本轮完整回归首次377/378：状态HTTP测试随机分配到Fetch禁止端口，报bad port，与空间功能无关。测试改用已有node:http访问随机本机服务器，保持响应状态码/JSON/鉴权断言；修正后完整378项通过。生产网络行为未修改。
