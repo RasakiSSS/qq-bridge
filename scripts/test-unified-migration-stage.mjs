@@ -11,6 +11,45 @@ import { UnifiedAttention } from '../src/unified/attention.js';
 import { importStagedMigration } from '../src/unified/migration-import.js';
 import { MigrationStage } from '../src/unified/migration-stage.js';
 
+test('Qzone import preserves exact read evidence and unknown replies without waking or enabling runtime', async t => {
+  const f = await fixture(t), q = f.qzone.accounts['100'];
+  q.ownPosts.push({ tid: 'own', authorQQ: '100', content: 'own preview', time: 10 });
+  for (const [cid, status] of [['new', 'new'], ['read', 'read'], ['unknown', 'replied']]) {
+    const key = JSON.stringify(['100', 'own', '', cid]);
+    q.comments[key] = { key, ownerQQ: '100', tid: 'own', parentId: '', commentId: cid, authorQQ: '200', content: cid, time: 11000, status };
+  }
+  f.stage.importSnapshot(await f.snapshot());
+  const store = new UnifiedStore(path.join(f.root, 'qzone-unified.sqlite'));
+  try {
+    const options = { store, stage: f.stage, account: '100', assertExclusive: () => true };
+    importStagedMigration(options);
+    const events = store.db.prepare("SELECT * FROM events WHERE scene='qzone'").all();
+    assert.equal(events.length, 3);
+    assert.equal(events.filter(r => r.unread).length, 1);
+    assert.ok(events.every(r => !r.wake && !r.notified && JSON.parse(r.payload).originalUnavailable));
+    const mappings = store.db.prepare("SELECT * FROM migration_sources WHERE scene='qzone'").all();
+    assert.equal(mappings.length, 4);
+    assert.equal(mappings.find(r => r.read_state === 'unknown').event_seq, null);
+    assert.ok(mappings.every(r => r.legacy_seq === 0));
+    assert.equal(importStagedMigration(options).status, 'already-imported');
+    assert.equal(store.db.prepare("SELECT phase FROM migration_imports").get().phase, 'staged');
+  } finally { store.close(); }
+});
+
+test('invalid Qzone projection rolls back QQ import and its migration lock in the same transaction', async t => {
+  const f = await fixture(t);
+  f.qzone.accounts['100'].pendingFeeds.push({ key: 'post:200:bad', authorQQ: '300', content: 'mismatch', time: 10 });
+  f.stage.importSnapshot(await f.snapshot());
+  const store = new UnifiedStore(path.join(f.root, 'invalid-qzone.sqlite'));
+  try {
+    assert.throws(() => importStagedMigration({ store, stage: f.stage, account: '100', assertExclusive: () => true }), { code: 'MIGRATION_INVALID_SOURCE' });
+    for (const table of ['accounts', 'events', 'migration_sources', 'migration_imports']) {
+      assert.equal(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
+    }
+    assert.equal(f.stage.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n, 1);
+  } finally { store.close(); }
+});
+
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-migration-stage-'));
   let stage;
@@ -21,7 +60,7 @@ async function fixture(t) {
     unread: [row], recentMessages: [row], agentToken: 'private-fixture-token',
     wakeConfig: { mode: 'diving', infinite: false, sleepUntil: new Date(2000).toISOString(), triggers: { anyMessage: false } },
     pendingThoughts: [{ text: 'unfinished fixture' }], memberImpressions: { '200': 'fixture' } } } };
-  const qzone = { version: 1, accounts: { '100': { ownPosts: ['own'], seenFeeds: ['seen'], pendingFeeds: ['pending'], comments: { c1: { read: false } }, writes: [{ status: 'uncertain' }] }, '999': { private: 'other-account' } } };
+  const qzone = { version: 1, accounts: { '100': { ownPosts: [], seenFeeds: ['post:100:seen'], pendingFeeds: [], comments: {}, writes: [{ status: 'uncertain' }] }, '999': { private: 'other-account' } } };
   const files = { 'social-v2.json': social, 'sessions.json': { sessions: { 'group:1': 'old-session' } },
     'config.json': { secret: 'not-imported' }, 'qzone.json': qzone,
     'current-role.json': { role: 'fixture' }, 'initial-prompts.json': { 'group:1': 'background' } };
@@ -35,7 +74,7 @@ async function fixture(t) {
   const file = path.join(root, 'stage.sqlite');
   const open = () => { stage = new MigrationStage({ file, verifyPrivate: () => true }); return stage; };
   open();
-  return { root, file, social, row, snapshot, handle: await snapshot(), get stage() { return stage; },
+  return { root, file, social, qzone, row, snapshot, handle: await snapshot(), get stage() { return stage; },
     reopen() { stage.close(); return open(); } };
 }
 test('transactional stage preserves unread, media, local context, sleep and account-specific Qzone without credentials', async t => {
@@ -50,7 +89,7 @@ test('transactional stage preserves unread, media, local context, sleep and acco
   assert.equal(context.pendingThoughts[0].text, 'unfinished fixture');
   const preserved = f.stage.db.prepare('SELECT * FROM preserved').all();
   const qzone = JSON.parse(preserved.find(row => row.category === 'qzone').payload);
-  assert.equal(qzone.comments.c1.read, false); assert.equal(qzone.writes[0].status, 'uncertain');
+  assert.deepEqual(qzone.comments, {}); assert.equal(qzone.writes[0].status, 'uncertain');
   assert.ok(!JSON.stringify(preserved).includes('other-account'));
   const serialized = JSON.stringify([row, context, preserved]);
   assert.ok(!serialized.includes('private-fixture-token')); assert.ok(!serialized.includes('not-imported'));

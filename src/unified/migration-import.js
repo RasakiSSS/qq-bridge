@@ -1,4 +1,5 @@
 import { accountId, sceneKey, fail, json } from './store.js';
+import { projectLegacyQzone } from './migration-qzone.js';
 
 // Host-only offline import. Must not be exposed to model tools or run against an
 // active installation. The source staging database and old files remain intact.
@@ -52,6 +53,20 @@ export function importStagedMigration({ store, stage, account, assertExclusive, 
       if (checkpoint({ phase: 'message', key: row.scene, sourceId: row.source_id })?.then) throw fail('ASYNC_TRANSACTION');
     }
     for (const row of input.preserved) preserve(row.category, row.payload);
+    const qzone = input.preserved.find(row => row.category === 'qzone');
+    const projected = projectLegacyQzone(account, qzone ? JSON.parse(qzone.payload) : null);
+    if (projected.length) store.scene(account, 'qzone');
+    for (const row of projected) {
+      let seq = null;
+      if (row.readState !== 'unknown' && row.at !== null) {
+        seq = Number(store.db.prepare('INSERT INTO events(account,scene,source_id,kind,payload,at,unread,wake,notified) VALUES(?,?,?,?,?,?,?,0,0)')
+          .run(account, 'qzone', row.sourceId, row.kind, json(row.payload), row.at, Number(row.readState === 'unread')).lastInsertRowid);
+      }
+      // Qzone has stable keys, no legacy QQ sequence. Zero explicitly means
+      // not applicable; reverse mapping must use the exact source key.
+      store.db.prepare('INSERT INTO migration_sources VALUES(?,?,?,?,?,?,?)')
+        .run(account, 'qzone', row.sourceId, 0, seq, row.readState, json(row));
+    }
     check();
     return { status: 'imported', phase: 'staged', operational: false, snapshotId: input.batch.snapshot, messages: input.messages.length };
   });

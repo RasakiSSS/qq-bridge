@@ -367,3 +367,16 @@ node --test --test-reporter=dot scripts/test-unified-foundation.mjs scripts/test
 4. 经过上述验收后再设计明确的激活/解除迁移锁流程，保留人工暂停原值；当前 phase=staged 不能手工改 SQL 绕过。旧关系通知、成员状态刷新、媒体文件工具、未知辅助作业人工核对、原生插件部署与真实 DSH/ACL/启动重连验收仍待完成。
 
 详见 `UNIFIED_AGENT_MIGRATION.md` 的“隔离实现状态”。用户未提交的旧人格和个人角色仍保留；仅推脱敏开发分支，生产 main 禁止 push。
+
+## 2026-10-31 空间精确映射交接（00:41 续作）
+
+从 8333412 继续，备份 codex/backup-unified-qzone-migration-20261031。开工五小时剩余 95%、周剩余 56%，没有使用重置权益。生产服务、开关、预设及用户未提交的人格/角色均未改动。
+
+- 新增 migration-qzone.js，按旧空间稳定键投影动态和评论。pending 与 seen 冲突阻断；未出现在 pending 不代表已读。只有保留正文的 seen 动态生成已读依据，只有 seen 键而正文已经淘汰的记录仍在原始资料中，不虚构事件。
+- 自己的动态视为已读，评论独立判断。旧 replied 在发送前就写入，只有对应账号、动态及评论的 sent 回复记录才能支持已读；未知回复、historical 和非关注评论保持 unknown。旧评论 new 的关注条件与现有 collector 一致。
+- 已接入隔离 importStagedMigration 原子事务：明确状态且时间有效的空间记录进入 events，wake/notified 均为 0；unknown 或缺时间只保留来源映射。空间 legacy_seq=0 表示没有 QQ 场景序号，反向映射必须用稳定 source_id。原始空间资料与未知写入仍完整保留。所有正文仍标 originalUnavailable，不能拿截断内容直接做完整总结/确认。
+- 不改变 schema，不激活 runtime、不解除 staged 锁。此前已导入的同一批次仍幂等返回，不自动补写旧隔离目标；未来升级/对账需要显式流程，禁止删除旧库或手工改 SQL。
+
+验证：完整相关组合 357 项通过（state/probes/unified-qzone-migration-tests.log）；之后增加空间错误导致整批 QQ 导入回滚用例，针对性 11 项通过（unified-qzone-migration-final.log），累计覆盖 358 项。语法与 diff 检查通过。所有数据库和账号使用夹具。
+
+下一步仍优先停稳协调与持续收件持久日志。注意当前 stage.delta_events 外键依赖已导入 snapshot 的 batch，不能直接用它接收快照之前的消息；需要在快照前建立独立持久收件屏障，并证明停稳期间无丢失/重复和账号代次不变，再做合并。空间映射已完成隔离投影，但反向已读回滚、增量合并、原文恢复、激活验收及真实 DSH/ACL 验证仍未完成。不能把本次映射当作在线迁移完成。
