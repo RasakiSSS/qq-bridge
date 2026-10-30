@@ -4487,6 +4487,16 @@ function updateOverview(status, modeLabel) {
   document.getElementById('metricDsh').textContent = status.dshReady ? '已连接' : '未连接';
   document.getElementById('metricDsh').className = status.dshReady ? 'ok' : 'err';
   document.getElementById('metricDshHint').textContent = status.dshReady ? '桥接状态已同步' : '请检查 DSH 是否运行';
+  let unified = document.getElementById('unifiedOverview');
+  if (!unified) {
+    unified = document.createElement('p'); unified.id = 'unifiedOverview';
+    document.getElementById('accessSummary').after(unified);
+  }
+  unified.hidden = !status.unified?.enabled;
+  const u = status.unified;
+  if (u?.enabled) unified.textContent = u.ready
+    ? `统一主会话 · ${u.permission} · ${u.paused ? '已暂停' : '运行中'} · ${u.peak ? '峰期' : '谷期'} · 当前 ${u.currentScene || '主菜单'} · 未读 ${u.counts.unread} · 调度 ${u.dispatch} · 待到期提醒 ${u.pendingTimers}`
+    : '统一主会话已配置，等待账号与运行器就绪';
   renderSnowlumaHealth(status.snowluma);
   document.getElementById('metricMode').textContent = modeLabel.replace('模式', '');
   document.getElementById('metricRole').textContent = '角色 · ' + (status.role || '默认人格');

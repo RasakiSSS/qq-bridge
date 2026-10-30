@@ -29,6 +29,7 @@ export function createUnifiedBridgeDriver({ createHost, ready, log = () => {}, i
     return ticking;
   }
   return {
+    async status() { if (closing) return { ready: false, closing: true }; return host ? host.status() : { ready: false }; },
     async ingest(input) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.ingest(input); },
     async wakeConfig(key) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.wakeConfig(key); },
     async friendRequest(event) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.friendRequest(event); },

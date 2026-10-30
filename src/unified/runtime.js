@@ -1,3 +1,4 @@
+import { UnifiedPersona } from './persona.js';
 import { UnifiedStore, fail } from './store.js';
 import { UnifiedScenes } from './scenes.js';
 import { UnifiedScheduler } from './scheduler.js';
@@ -22,7 +23,7 @@ export class UnifiedRuntime {
   #closed = false;
   constructor({ file, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
-    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, memory, summaries, now = Date.now }) {
+    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, memory, summaries, readPersona, legacyCommand, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
       || typeof isWakeAllowed !== 'function') throw fail('RUNTIME_HOST_ADAPTER_REQUIRED');
     this.store = new UnifiedStore(file);
@@ -63,9 +64,10 @@ export class UnifiedRuntime {
           if (result?.result?.ok !== true) throw fail('SUMMARY_RETIRE_FAILED');
           this.#context(); api.events.forget?.(sid);
         } });
-      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, memory: this.memory, summaries: this.summaries, toolAllowed });
-      this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, now });
-      this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now,
+      if (readPersona) this.persona = new UnifiedPersona({ scenes: this.scenes, read: readPersona });
+      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, memory: this.memory, summaries: this.summaries, persona: this.persona, toolAllowed });
+      this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, legacyCommand, now });
+      this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now, personaStatus: () => this.persona?.status(),
         ensureSession: async identity => {
           const before = this.#context();
           const check = () => {
@@ -126,6 +128,19 @@ export class UnifiedRuntime {
     if (!this.scenes.allowed(key, ctx)) throw fail('SCENE_DENIED');
     // Pause/peak suppress model activity, not durable incoming messages.
     return this.store.append({ account: ctx.account, scene: key, sourceId, kind, payload, at, wake });
+  }
+  // Operator-only snapshot: no inbox receipts, model wake or state normalization.
+  status() {
+    const ctx = this.#context(), db = this.store.db;
+    const state = db.prepare('SELECT permission,paused,current_scene,session_id,retry_at FROM accounts WHERE account=?').get(ctx.account);
+    const counts = db.prepare('SELECT COUNT(*) AS total, COALESCE(SUM(unread),0) AS unread FROM events WHERE account=?').get(ctx.account);
+    const phases = db.prepare('SELECT phase,COUNT(*) AS count FROM summary_jobs WHERE account=? GROUP BY phase').all(ctx.account);
+    return { ready: true, account: ctx.account, permission: state.permission,
+      paused: !!(ctx.paused || state.paused || ctx.enabled === false), peak: this.scenes.peak(ctx),
+      currentScene: state.current_scene, sessionId: state.session_id, retryAt: state.retry_at,
+      dispatch: this.store.active(ctx.account)?.status || 'idle',
+      counts: { ...counts }, summaries: Object.fromEntries(phases.map(row => [row.phase, row.count])),
+      pendingTimers: db.prepare('SELECT COUNT(*) AS count FROM wake_timers WHERE account=? AND event_seq IS NULL').get(ctx.account).count };
   }
   wakeConfig(key) { this.#context(); return this.attention.config(key); }
   friendRequest(event) { this.#context(); if (!this.relationships) throw fail('ACTION_DENIED'); return this.relationships.ingest(event); }

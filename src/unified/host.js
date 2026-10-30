@@ -41,6 +41,7 @@ export async function startUnifiedHost({ bindingFile, assertInstallationOwner, i
       if (closing) throw fail('RUNTIME_CLOSED');
       assertInstallationOwner(); return runtime.ingest(input);
     },
+    status: () => run(() => runtime.status()),
     tick: () => run(() => runtime.tick()),
     wakeConfig: key => run(() => runtime.wakeConfig(key)),
     friendRequest: event => run(() => runtime.friendRequest(event)),

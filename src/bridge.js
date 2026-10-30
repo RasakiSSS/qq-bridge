@@ -3745,6 +3745,7 @@ async function main() {
           sendJson({
             mode: currentMode,
             closedAgentPreset,
+            unified: unifiedConfigured ? { enabled: true, ...await unifiedDriver?.status() } : { enabled: false },
             role: rs.role ?? null,
             roleMode: rs.mode ?? 'active',
             dshReady,
@@ -9899,7 +9900,7 @@ async function main() {
   // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
   let roleHintCache = { key: '', raw: '' };
   // 原始人格卡（按 mtime 缓存，不截断）。
-  function roleRawContent() {
+  function roleRawContent(fresh = false) {
     try {
       const rs = readRoleState();
       if (!rs.role) return '';
@@ -9921,7 +9922,7 @@ async function main() {
       // ② 同名的原地重写若长度变了（大多数编辑都会变），size 变化也能击穿缓存。
       // 代价只是多几次 stat，比"热注入路径上一直发旧人格"划算得多。
       const cacheKey = `${safeName}:${stateStat.mtimeMs}:${stateStat.size}:${roleStat.mtimeMs}:${roleStat.size}`;
-      if (roleHintCache.key === cacheKey) return roleHintCache.raw;
+      if (!fresh && roleHintCache.key === cacheKey) return roleHintCache.raw;
       const raw = fs.readFileSync(roleFile, 'utf8');
       roleHintCache = { key: cacheKey, raw };
       return raw;
@@ -10027,9 +10028,9 @@ async function main() {
     return `第 ${bad.join('，')} 条之间像是把同一句话拆开了；如果两条拼起来才完整，请合并成一条，或把断点移到完整句子的边界。`;
   }
 
-  function currentRoleHintV2() {
+  function currentRoleHintV2(full = false) {
     // 先按 〔二代〕/〔一代〕 标记筛小节；下面的逐行过滤只是给「没标记的老卡片」兜底。
-    const raw = roleHintForMode('v2');
+    const raw = full ? selectRoleText(roleRawContent(true), 'v2') : roleHintForMode('v2');
     if (!raw) return '';
     // 一代仿真模式专用指令整行过滤，避免污染二代工具协议。
     // 用 role-card.js 导出的那份（文件顶部已 import）：这里原先又抄了一份同源正则，
@@ -12296,6 +12297,28 @@ async function main() {
             getContext: () => { if (selfUserId !== account) throw new Error('统一模式账号已变化，请完成交接后重启'); return unifiedContext(); },
             isAllowed: key => key === 'qzone' ? cfg.socialV2?.qzone?.enabled === true && v2ToolEnabled('qzoneRead') : isSessionAllowedInCurrentMode(key),
             isWakeAllowed: row => !shouldBlockSilentReply(row.scene),
+            readPersona: () => ({ name: readRoleState().role, mode: readRoleState().mode, text: currentRoleHintV2(true) }),
+            legacyCommand: command => {
+              const rs = readRoleState();
+              if (command === '/reset' || command === '/new') return '统一主会话不能按单个窗口重置；本次未清除上下文、记忆或未读。';
+              if (command === '/status') return `统一主会话；角色 ${rs.role ?? '无'}；模式 ${rs.mode}；人工暂停 ${socialV2.paused ? '是' : '否'}。`;
+              if (['/silent', '/quiet', '/active', '/speak'].includes(command)) {
+                const silent = ['/silent', '/quiet'].includes(command);
+                writeRoleState(rs.role, silent ? 'silent' : 'active');
+                return silent ? '已进入静默模式，仅管理员可对话。' : '已退出静默模式；人工暂停状态保持不变。';
+              }
+              if (/^\/role(?:\s|$)/.test(command)) {
+                const requested = command.slice(5).trim();
+                if (!requested || ['off', 'clear'].includes(requested)) {
+                  writeRoleState(null, rs.mode); return '已清除角色，恢复正常人格。';
+                }
+                const name = sanitizeRoleName(requested);
+                if (!name || name !== requested || name.includes('..')) return '角色名称无效。';
+                if (!fs.existsSync(path.join(ROLES_DIR, name + '.md'))) return '角色不存在，请先在控制台创建角色。';
+                writeRoleState(name, rs.mode); return `已切换角色：${name}。`;
+              }
+              return '统一模式尚不支持该命令或参数，请使用控制台；本次不会转交模型执行。';
+            },
             initialWakeConfig: key => getSocialV2State(key).wakeConfig,
             toolAllowed: name => v2ToolEnabled(name),
             sleepBounds: () => cfg.socialV2?.wake || {},

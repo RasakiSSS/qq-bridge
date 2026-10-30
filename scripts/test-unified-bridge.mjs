@@ -390,3 +390,54 @@ test('Qzone uncertain network write remains unknown and is never retried under s
   assert.equal(JSON.parse((await h.call('qq_qzone_publish', args, 'lost')).text).status, 'unknown');
   assert.equal(writes, 1);
 });
+
+test('bridge role commands and paginated persona use live trusted role files', async t => {
+  const h = await fixture(t);
+  const role = '## fixture\n' + '性格资料。'.repeat(1800) + '\n## old〔一代〕\nOLD_ONLY\n## new〔二代〕\nNEW_ONLY';
+  fs.mkdirSync(path.join(h.temp, 'roles'), { recursive: true });
+  fs.writeFileSync(path.join(h.temp, 'roles/fixture.md'), role);
+  await h.receive('private:123', 1, '/role fixture');
+  await h.receive('private:123', 2, 'hello');
+  await h.unifiedDriver.tick();
+  const envelope = JSON.parse(h.calls.prompts[0].content[0].text);
+  assert.equal(envelope.persona.name, 'fixture');
+  let result = JSON.parse((await h.call('qq_get_prompt')).text), text = result.text;
+  assert.equal(result.revision, envelope.persona.revision);
+  while (result.nextOffset !== null) {
+    result = JSON.parse((await h.call('qq_get_prompt', { offset: result.nextOffset, revision: result.revision })).text);
+    text += result.text;
+  }
+  assert.ok(text.length > 8000);
+  assert.ok(text.includes('NEW_ONLY')); assert.ok(!text.includes('OLD_ONLY'));
+  await h.receive('private:123', 3, '/role off');
+  assert.equal(JSON.parse((await h.call('qq_get_prompt')).text).text, '');
+  await h.receive('private:123', 4, '/reset');
+  assert.equal(h.calls.created.length, 1);
+  assert.equal(JSON.parse((await h.call('qq_get_main_menu')).text).sessions[0].unread, 1);
+});
+
+test('status does not lazily open host and console snapshot does not expose main bearer', async t => {
+  let opened = 0;
+  const driver = createUnifiedBridgeDriver({ createHost: () => { opened++; }, ready: () => false });
+  assert.deepEqual(await driver.status(), { ready: false }); assert.equal(opened, 0); await driver.close();
+  const h = await fixture(t); await h.receive(); await h.unifiedDriver.tick();
+  const server = h.startConsoleServer();
+  if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/status`, { headers: { 'x-console-token': 'fixture-console-token' } });
+    const status = await response.json();
+    assert.equal(status.unified.enabled, true); assert.equal(status.unified.counts.unread, 1);
+    assert.equal(status.unified.dispatch, 'accepted');
+    const credential = JSON.parse(fs.readFileSync(path.join(h.temp, 'state/unified-mcp.json')));
+    assert.ok(!JSON.stringify(status.unified).includes(credential.token));
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('legacy active command never clears manual pause and control messages stay out of model inbox', async t => {
+  const h = await fixture(t); h.socialV2.paused = true;
+  for (const [i, command] of ['/silent', '/active', '/new', '/model arbitrary'].entries()) await h.receive('private:123', i + 1, command);
+  assert.equal(h.socialV2.paused, true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.temp, 'state/current-role.json'))).mode, 'active');
+  assert.equal((await h.unifiedDriver.status()).counts.total, 0);
+  assert.equal(h.calls.created.length, 0); assert.equal(h.calls.prompts.length, 0);
+});

@@ -63,3 +63,17 @@ test('identity changing during authentication prevents permission write', async 
   await assert.rejects(f.management.fromQQ(f.connection, f.event), { code: 'IDENTITY_CHANGED' });
   assert.equal(f.store.account('100').permission, 'v3');
 });
+
+test('legacy commands use the same authenticated owner-private boundary', async t => {
+  const f = fixture(t); const calls = [];
+  f.management.legacyCommand = (text, ctx) => { calls.push([text, ctx.account]); return 'handled'; };
+  for (const command of ['/role fixture', '/silent', '/active', '/status', '/reset', '/new', '/model unsupported']) {
+    assert.equal((await f.management.fromQQ(f.connection, { ...f.event, message: command, message_type: 'group' })).denied, true);
+    assert.equal((await f.management.fromQQ(f.connection, { ...f.event, message: command, user_id: 201 })).denied, true);
+    assert.equal((await f.management.fromQQ(f.connection, { ...f.event, message: command })).response, 'handled');
+  }
+  assert.equal(calls.length, 7);
+  f.management.authenticateQQ = async () => { f.ctx.identityEpoch++; return true; };
+  await assert.rejects(f.management.fromQQ(f.connection, { ...f.event, message: '/role off' }), { code: 'IDENTITY_CHANGED' });
+  assert.equal(calls.length, 7);
+});

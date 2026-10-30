@@ -4,9 +4,9 @@ import { fail, json } from './store.js';
 // No timers, network clients or production side effects at import time. The
 // adapter supplies ensureSession and prompt, and calls tick on eligible events.
 export class UnifiedScheduler {
-  constructor({ store, scenes, ensureSession, prompt, isWakeAllowed = () => true, now = Date.now }) {
+  constructor({ store, scenes, ensureSession, prompt, isWakeAllowed = () => true, personaStatus = () => undefined, now = Date.now }) {
     this.store = store; this.scenes = scenes; this.ensureSession = ensureSession;
-    this.prompt = prompt; this.now = now; this.isWakeAllowed = isWakeAllowed;
+    this.personaStatus = personaStatus; this.prompt = prompt; this.now = now; this.isWakeAllowed = isWakeAllowed;
   }
   claim(ctx) {
     return this.store.transaction(() => {
@@ -86,7 +86,7 @@ export class UnifiedScheduler {
         }
         const receipts = [...scopes].map(([key, batch]) => ({ key,
           receipt: this.store.receipt(row.account, key, 'read', batch, this.now()) }));
-        const input = [{ type: 'text', text: json({ requestId: row.id, messages, receipts }, 32768) }];
+        const input = [{ type: 'text', text: json({ requestId: row.id, persona: this.personaStatus(), messages, receipts }, 32768) }];
         this.store.db.prepare("UPDATE dispatches SET status='dispatching',content=? WHERE id=? AND status='preparing'")
           .run(json(input, 40000), row.id);
         return input;

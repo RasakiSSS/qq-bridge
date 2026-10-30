@@ -11,9 +11,9 @@ const levels = {
 // Separate HOST ingress, never part of the model's MCP tool surface. Authenticators
 // must verify the OneBot connection/console request; payload fields are not proof.
 export class UnifiedManagement {
-  constructor({ scenes, authenticateQQ, authenticateConsole, now = Date.now }) {
+  constructor({ scenes, authenticateQQ, authenticateConsole, legacyCommand, now = Date.now }) {
     if (typeof authenticateQQ !== 'function' || typeof authenticateConsole !== 'function') throw fail('MANAGEMENT_AUTH_REQUIRED');
-    this.scenes = scenes; this.authenticateQQ = authenticateQQ; this.authenticateConsole = authenticateConsole; this.now = now;
+    this.legacyCommand = legacyCommand; this.scenes = scenes; this.authenticateQQ = authenticateQQ; this.authenticateConsole = authenticateConsole; this.now = now;
   }
   #contextUnchanged(before) {
     const ctx = this.scenes.context();
@@ -42,13 +42,17 @@ export class UnifiedManagement {
     else if (Array.isArray(event?.message) && event.message.length > 0 && event.message.every(p => p?.type === 'text' && typeof p.data?.text === 'string')) {
       text = event.message.map(p => p.data.text).join('');
     }
-    if (typeof text !== 'string' || !/^\/permission(?:\s|$)/.test(text.trim())) return { handled: false };
+    if (typeof text !== 'string' || !text.trim().startsWith('/')) return { handled: false };
     const before = this.scenes.context();
     if (await this.authenticateQQ(connection, event) !== true) throw fail('UNAUTHORIZED');
     const ctx = this.#contextUnchanged(before);
     if (event.post_type !== 'message' || event.message_type !== 'private' || id(event.self_id) !== ctx.account
       || !ctx.ownerQQ || id(event.user_id) !== ctx.ownerQQ) {
-      return { handled: true, denied: true, response: '只有管理员私聊可以查看或修改全局权限。' };
+      return { handled: true, denied: true, response: '只有管理员私聊可以使用统一管理命令。' };
+    }
+    if (!/^\/permission(?:\s|$)/.test(text.trim())) {
+      const response = this.legacyCommand ? this.legacyCommand(text.trim(), ctx) : '该管理命令尚未接入统一模式。';
+      return { handled: true, response };
     }
     const match = /^\/permission(?:\s+(v[123]))?$/.exec(text.trim());
     if (!match) return { handled: true, response: '用法：/permission 或 /permission v1、v2、v3。' };

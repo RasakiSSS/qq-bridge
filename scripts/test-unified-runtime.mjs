@@ -131,3 +131,18 @@ test('close revokes tool access and rejects future runtime work without remote c
   await assert.rejects(f.runtime.tools.call(token, 'qq_get_main_menu'), { code: 'UNAUTHORIZED' });
   assert.equal(f.prompts.length, 1);
 });
+
+test('operator status is read-only, works while paused and contains no message payloads', async t => {
+  const f = fixture(t); f.add('group:1', 'private-content');
+  f.ctx.paused = true;
+  const tables = ['accounts', 'scenes', 'events', 'receipts', 'dispatches', 'wake_timers', 'summary_jobs'];
+  const snapshot = () => JSON.stringify(tables.map(table => f.runtime.store.db.prepare(`SELECT * FROM ${table}`).all()));
+  const before = snapshot();
+  for (let i = 0; i < 3; i++) {
+    const status = f.runtime.status();
+    assert.equal(status.paused, true); assert.equal(status.counts.unread, 1);
+    assert.equal(status.sessionId, null); assert.equal(status.dispatch, 'idle');
+    assert.ok(!JSON.stringify(status).includes('private-content'));
+  }
+  assert.equal(snapshot(), before); assert.equal(f.prompts.length, 0); assert.equal(f.creates.length, 0);
+});
