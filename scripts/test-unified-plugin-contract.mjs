@@ -14,7 +14,7 @@ const { assertObjectJsonSchema, assertSupportedJsonSchema, validateJsonSchemaVal
 test('installed DSH validator accepts every unified tool input/output schema', () => {
   const definitions = [];
   apply({ tools: { register: definition => definitions.push(definition) } });
-  assert.equal(definitions.length, 22);
+  assert.equal(definitions.length, 26);
   for (const definition of definitions) {
     assert.doesNotThrow(() => assertObjectJsonSchema(definition.parameters), definition.name);
     assert.doesNotThrow(() => assertSupportedJsonSchema(definition.output.schema), definition.name);

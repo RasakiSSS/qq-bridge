@@ -12299,6 +12299,12 @@ async function main() {
             initialWakeConfig: key => getSocialV2State(key).wakeConfig,
             toolAllowed: name => v2ToolEnabled(name),
             sleepBounds: () => cfg.socialV2?.wake || {},
+            summaries: { policy: () => {
+              if (!dshPresetIds.includes('qq-summary') || !v2ToolEnabled('getUnread') || readRoleState().mode === 'silent') throw Object.assign(new Error('辅助总结不可用'), { code: 'ACTION_DENIED' });
+            } },
+            memory: { memory: sharedMemory, policy: () => {
+              if (!memoryConfig().enabled || !v2ToolEnabled('memory') || readRoleState().mode === 'silent') throw Object.assign(new Error('共同记忆不可用'), { code: 'ACTION_DENIED' });
+            } },
             relationships: { policy: unifiedRelationshipPolicy,
               request: (action, params) => withTimeout(bot.request(action, params), 15000, '统一关系请求'),
               nativeRequest: unifiedNativeRequest },

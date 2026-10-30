@@ -12,20 +12,26 @@ import { invokeMainTool } from '../plugins/qq-agent-presets/qq-unified-client.mj
 const ok = value => ({ result: { ok: true, value } });
 async function fixture(t, options = {}, globals = {}) {
   let sid;
+  const sessionPresets = new Map();
   const h = await bridgeHarness({ config: { socialV2: { unified: { enabled: true, workspaceId: 'fixture-workspace' }, sharedMemory: { enabled: false }, ...options } },
     files: { 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml': '[]' },
     globals: { startUnifiedHost: input => startUnifiedHost({ ...input,
       bindingOptions: { verify: () => true, harden: () => ({ ok: true }) },
-      runtimeOptions: { ...input.runtimeOptions, readWorkspaces: async () => ({ items: [{ workspaceId: 'fixture-workspace', sessionIds: sid ? [sid] : [] }], archivedSessionIds: [] }) },
+      runtimeOptions: { ...input.runtimeOptions, readWorkspaces: async () => ({ items: [{ workspaceId: 'fixture-workspace', sessionIds: [...sessionPresets.keys()] }], archivedSessionIds: [] }) },
     }), ...globals },
   });
   t.after(() => h.close());
   h.setPresets(['qq-unified']); h.setMode('reserved2'); h.setSelfIdentity('fixture', '100'); h.setConnected(true);
-  h.api.sessions.list = async () => ok({ items: sid ? [{ sessionId: sid, formatStatus: 'current', running: false }] : [] });
+  h.api.sessions.list = async () => ok({ items: [...sessionPresets.keys()].map(sessionId => ({ sessionId, formatStatus: 'current', running: false })) });
   const create = h.api.sessions.create;
-  h.api.sessions.create = async input => { const result = await create(input); sid = result.result.value.sessionId; return result; };
+  h.api.sessions.create = async input => {
+    const result = await create(input), created = result.result.value.sessionId;
+    sessionPresets.set(created, input.agentPreset);
+    if (input.agentPreset === 'qq-unified') sid = created;
+    return result;
+  };
   h.api.sessions.prompt = async input => { h.calls.prompts.push(input); return ok({ accepted: true }); };
-  h.api.callUnary = async () => ok(sid ? { kind: 'sequenced', asOfSeq: 0, values: { agentPreset: 'qq-unified', inbox: { 'next-step': [], 'next-turn': [] } } } : null);
+  h.api.callUnary = async (_method, input) => ok(sessionPresets.has(input.sessionId) ? { kind: 'sequenced', asOfSeq: 0, values: { agentPreset: sessionPresets.get(input.sessionId), inbox: { 'next-step': [], 'next-turn': [] } } } : null);
   const file = path.join(h.temp, 'state/unified-mcp.json');
   return Object.assign(h, {
     receive: (key = 'private:123', id = 1, message = 'hello') => {
@@ -133,6 +139,48 @@ test('real bridge exposes workspace tools only through global v3 and honors sile
   const roleFile = path.join(h.temp, 'state', 'current-role.json');
   fs.writeFileSync(roleFile, JSON.stringify({ mode: 'silent' }));
   assert.equal((await h.call('qq_workspace_file', args, 'roots-3')).error, true);
+});
+
+test('unified bridge recall and remember reuse incoming evidence without a worker session', async t => {
+  const h = await fixture(t, { sharedMemory: { enabled: true }, tools: { memory: true } });
+  await h.receive('private:123', 1, '周末看电影'); await h.unifiedDriver.tick();
+  const recalled = JSON.parse((await h.call('qq_recall', { query: '电影' })).text);
+  assert.equal(recalled.events.length, 1);
+  const note = { kind: 'openLoop', text: '周末电影', evidenceIds: [recalled.events[0].id] };
+  const saved = JSON.parse((await h.call('qq_remember', { note }, 'remember-1')).text);
+  assert.equal(saved.status, 'succeeded');
+  assert.equal(JSON.parse((await h.call('qq_recall')).text).notes.length, 1);
+  assert.equal(h.calls.created.length, 1);
+  assert.equal(JSON.parse((await h.call('qq_get_main_menu')).text).sessions[0].unread, 1);
+  h.cfg.socialV2.sharedMemory.enabled = false;
+  assert.equal((await h.call('qq_recall')).error, true);
+});
+
+test('bridge summary worker uses shared workspace, keeps main identity and exposes only delivered coverage', async t => {
+  const h = await fixture(t); h.setPresets(['qq-unified', 'qq-summary']);
+  await h.receive('private:123', 1, '待总结'); await h.unifiedDriver.tick();
+  const started = JSON.parse((await h.call('qq_summarize_unread', { key: 'private:123' }, 'summary-call')).text);
+  assert.equal(started.status, 'queued'); await h.unifiedDriver.tick();
+  const request = h.calls.prompts.find(x => x.requestId === started.jobId);
+  assert.ok(request); assert.notEqual(request.sessionId, h.calls.created[0].sessionId);
+  assert.equal(h.calls.created.length, 2);
+  assert.equal(h.calls.created[1].workspaceId, h.calls.created[0].workspaceId);
+  assert.equal(h.calls.created[1].agentPreset, 'qq-summary');
+  const db = new DatabaseSync(path.join(h.temp, 'state/unified.sqlite'), { readOnly: true });
+  let row;
+  try { row = db.prepare('SELECT * FROM summary_jobs WHERE id=?').get(started.jobId); } finally { db.close(); }
+  const coveredSeqs = JSON.parse(row.input).messages.map(x => x.seq);
+  const records = [
+    { seq: 0, type: 'turn/start', data: { turn: 1 } },
+    { seq: 1, type: 'user/message', data: { source: { kind: 'user', rpcId: started.jobId } } },
+    { seq: 2, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: JSON.stringify({ summary: '用户有待总结的消息', coveredSeqs }) }] } } },
+    { seq: 3, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ];
+  for (const event of records) await h.unifiedDriver.onDshFrame({ type: 'session/event', sessionId: request.sessionId, event });
+  const result = JSON.parse((await h.call('qq_get_summary', { jobId: started.jobId })).text);
+  assert.equal(result.status, 'ready');
+  assert.equal(JSON.parse((await h.call('qq_mark_read', { receipt: result.receipt })).text).marked, 1);
+  assert.equal(JSON.parse((await h.call('qq_get_current_session')).text), null);
 });
 
 test('pause/offline retain input and do not create or prompt a model', async t => {

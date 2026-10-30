@@ -15,6 +15,22 @@ const requestRef = { requestId: z.string().regex(/^[a-f0-9]{64}$/), reason };
 const relationTools = { qq_accept_friend_request: 'accept_request', qq_reject_friend_request: 'reject_request',
   qq_delete_friend: 'delete_friend', qq_leave_group: 'leave_group', qq_request_friend: 'request_friend' };
 const definitions = {
+  qq_summarize_unread: ['委托无工具权限的辅助会话总结指定场景的一批未读，默认最多 30 条；在菜单也可发起。返回 jobId 后可继续其他活动，完成由桥接通知，不自动标记已读。过长单条应进入场景读取原文。', { key, limit: z.number().int().min(1).max(30).optional() }],
+  qq_get_summary: ['查询本主会话发起的总结。ready 时返回总结和精确已读回执，由你决定是否确认；queued/accepted/unknown 时不要循环查询。峰期隐藏场景的结果延后交付。', { jobId: handle }],
+  qq_recall: ['查询当前账号已有的共同经历和长期记忆，可在菜单使用，不启动模型整理、不标记已读。峰期隐藏场景的新未读不能借记忆查询读取。', {
+    people: z.array(qqId).max(10).optional(), query: z.string().max(300).optional(),
+    since: z.number().int().nonnegative().max(8640000000000000).optional(),
+    limit: z.number().int().min(1).max(30).optional(), includeClosed: z.boolean().optional(),
+  }],
+  qq_remember: ['保存或更新有原始经历依据的共同记忆。先用 qq_recall 取得 evidenceIds；区分事实、印象、经历和待续事项。更新应带 id 和 updatedAt，重复调用不重复修改。', {
+    note: z.object({ id: z.string().regex(/^n_[a-f0-9]{32}$/).optional(),
+      kind: z.enum(['fact', 'impression', 'episode', 'openLoop']), personQQ: qqId.optional(),
+      text: z.string().min(1).max(600), evidenceIds: z.array(z.string().regex(/^e_[a-f0-9]{32}$/)).min(1).max(8),
+      status: z.enum(['open', 'done', 'dismissed']).optional(),
+      dueAt: z.number().int().nonnegative().max(8640000000000000).optional(),
+      mentioned: z.boolean().optional(), updatedAt: z.number().int().nonnegative().optional(),
+    }).strict(),
+  }],
   qq_qzone_status: ['查看已进入空间的发说说额度、间隔和评论支持情况，不读取或标记动态。', { capability: handle }],
   qq_qzone_refresh: ['按需浏览已配置的好友首页和指定 QQ，将新动态与评论加入统一收件箱；不会发送、标记已读或创建空间会话。idle 表示正在采集或失败退避，不要循环重试。之后用 qq_get_unread_msg 分批读取。', { capability: handle }],
   qq_workspace_file: ['全局 v3 受限工作区文件工具，在菜单也能使用。root 默认为 0，path/paths 必须相对此根；仅填写 operation 对应参数。读取文本可用 head 或 tail 分批。只有可信 owner 私聊/控制台要求或你自主决定时使用；普通人的文件要求明确拒绝。未知写入结果不可换调用重试。', {
@@ -86,6 +102,8 @@ export function unifiedToolCatalog() {
 }
 const digest = (token) => createHash('sha256').update(token).digest();
 const toolFlags = {
+  qq_summarize_unread: 'getUnread', qq_get_summary: 'getUnread',
+  qq_recall: 'memory', qq_remember: 'memory',
   qq_qzone_status: 'qzoneRead', qq_qzone_refresh: 'qzoneRead',
   qq_list_friend_requests: 'relationships', ...Object.fromEntries(Object.keys(relationTools).map(name => [name, 'relationships'])),
   qq_get_unread_msg: 'getUnread', qq_mark_read: 'markRead', qq_send_message: 'sendMessage',
@@ -99,9 +117,11 @@ const toolFlags = {
 export class UnifiedTools {
   #credential;
   #tail = Promise.resolve();
-  constructor({ scenes, actions, attention, relationships, toolAllowed = () => true }) {
+  constructor({ scenes, actions, attention, relationships, memory, summaries, toolAllowed = () => true }) {
     this.scenes = scenes; this.actions = actions; this.attention = attention; this.toolAllowed = toolAllowed;
     this.relationships = relationships;
+    this.memory = memory;
+    this.summaries = summaries;
   }
   #checkTool(name) { if (toolFlags[name] && this.toolAllowed(toolFlags[name]) !== true) throw fail('TOOL_DENIED'); }
   #binding() {
@@ -158,6 +178,20 @@ export class UnifiedTools {
         return this.actions.run({ operation: `relationship:${relationTools[name]}`, callId: execution?.callId, payload: a, checkCaller: check });
       }
       switch (name) {
+        case 'qq_summarize_unread':
+          if (!this.summaries) throw fail('ACTION_DENIED');
+          this.authenticate(token, execution?.sessionId);
+          return this.summaries.start({ ...a, callId: execution?.callId });
+        case 'qq_get_summary':
+          if (!this.summaries) throw fail('ACTION_DENIED');
+          return this.summaries.get(a.jobId);
+        case 'qq_recall':
+          if (!this.memory) throw fail('ACTION_DENIED');
+          return this.memory.recall(a);
+        case 'qq_remember':
+          if (!this.actions) throw fail('ACTION_DENIED');
+          this.authenticate(token, execution?.sessionId);
+          return this.actions.run({ operation: 'remember', callId: execution?.callId, payload: a, checkCaller: check });
         case 'qq_workspace_file':
           if (!this.actions) throw fail('ACTION_DENIED');
           this.authenticate(token, execution?.sessionId);
@@ -200,6 +234,7 @@ export class UnifiedTools {
 }
 
 const errors = new Set(['UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
+  'SUMMARY_INPUT_TOO_LARGE', 'SUMMARY_NOT_READY',
   'FILES_UNAVAILABLE', 'FILE_PATH_DENIED',
   'REQUEST_UNAVAILABLE',
   'ACTION_DENIED', 'ACTION_ID_CONFLICT', 'INVALID_CALL_ID',

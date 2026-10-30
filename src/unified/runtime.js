@@ -9,6 +9,9 @@ import { UnifiedOwner } from './owner.js';
 import { UnifiedAttention } from './attention.js';
 import { UnifiedRelationships } from './relationships.js';
 import { UnifiedFiles } from './files.js';
+import { UnifiedMemory } from './memory.js';
+import { UnifiedSummary } from './summary.js';
+import { summaryWorkerAdapter } from './summary-dsh.js';
 
 // Explicit host composition. Merely importing this module does nothing. This
 // has account ownership fencing, but no production transport or legacy migration.
@@ -19,7 +22,7 @@ export class UnifiedRuntime {
   #closed = false;
   constructor({ file, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
-    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, now = Date.now }) {
+    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, memory, summaries, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
       || typeof isWakeAllowed !== 'function') throw fail('RUNTIME_HOST_ADAPTER_REQUIRED');
     this.store = new UnifiedStore(file);
@@ -46,8 +49,21 @@ export class UnifiedRuntime {
           handlers[`relationship:${action}`] = this.relationships.handler(action);
       }
       if (files) handlers = { ...handlers, workspaceFile: new UnifiedFiles(files).handler() };
+      if (memory) {
+        this.memory = new UnifiedMemory({ ...memory, scenes: this.scenes });
+        handlers = { ...handlers, remember: this.memory.handler() };
+      }
       this.actions = new UnifiedActions({ store: this.store, scenes: this.scenes, handlers: { ...handlers, setWakeConfig: this.attention.handler() }, now });
-      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, toolAllowed });
+      if (summaries) this.summaries = new UnifiedSummary({ scenes: this.scenes, now, policy: summaries.policy,
+        ensureWorker: summaryWorkerAdapter({ store: this.store, api, workspaceId, configureModel, readWorkspaces }),
+        prompt: input => { this.#context(); return api.sessions.prompt(input); }, follow: sid => api.events.follow(sid),
+        retire: async sid => {
+          this.#context();
+          const result = await api.workspace.archiveSession({ sessionId: sid });
+          if (result?.result?.ok !== true) throw fail('SUMMARY_RETIRE_FAILED');
+          this.#context(); api.events.forget?.(sid);
+        } });
+      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, memory: this.memory, summaries: this.summaries, toolAllowed });
       this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, now });
       this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now,
         ensureSession: async identity => {
@@ -113,7 +129,13 @@ export class UnifiedRuntime {
   }
   wakeConfig(key) { this.#context(); return this.attention.config(key); }
   friendRequest(event) { this.#context(); if (!this.relationships) throw fail('ACTION_DENIED'); return this.relationships.ingest(event); }
-  tick() { this.#context(); this.attention.materialize(); return this.scheduler.tick(); }
+  tick() {
+    this.#context(); this.attention.materialize();
+    return this.scheduler.tick().then(async result => {
+      await this.summaries?.tick();
+      return result;
+    });
+  }
   onDshFrame(payload, options = {}) {
     const operation = this.#frameTail.then(() => this.#onDshFrame(payload, options));
     this.#frameTail = operation.catch(() => {});
@@ -121,6 +143,12 @@ export class UnifiedRuntime {
   }
   async #onDshFrame(payload, { signal } = {}) {
     const ctx = this.#context();
+    if (this.summaries && payload?.type === 'session/event' && this.summaries.event(payload.sessionId, payload.event)) return { handled: true, summary: true };
+    if (this.summaries && payload?.type === 'session/snapshot' && await this.summaries.recover(payload.sessionId, payload.snapshot, async args => {
+      const result = await this.api.callUnary('session/page', args, signal);
+      if (result?.result?.ok !== true) throw fail('DSH_READ_FAILED');
+      return result.result.value;
+    })) return { handled: true, summary: true };
     if (payload?.sessionId !== this.store.account(ctx.account).session_id) return { handled: false };
     if (payload.type === 'session/event') {
       const completed = this.evidence.event(payload.sessionId, payload.event);

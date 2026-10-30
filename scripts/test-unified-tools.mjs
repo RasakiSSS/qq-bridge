@@ -94,7 +94,7 @@ test('real MCP list/call transport exposes only registered tools, keeps credenti
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(a); await client.connect(b);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 22);
+  assert.equal(list.tools.length, 26);
   assert.ok(!JSON.stringify(list).includes(f.token));
   assert.ok(!JSON.stringify(list).includes('ownerQQ'));
   const joined = await client.callTool({ name: 'qq_join_session', arguments: { key: 'group:1' } });

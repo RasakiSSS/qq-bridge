@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { SENSITIVE_RE } from './sensitive.js';
 
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+export const memoryEventId = (account, source, externalId) => 'e_' + hash(JSON.stringify([String(account), source, String(externalId)])).slice(0, 32);
 const qq = (value) => /^[1-9]\d{0,19}$/.test(String(value ?? '')) ? String(value) : '';
 const bounded = (value, fallback, min, max) => Number.isFinite(Number(value)) ? Math.max(min, Math.min(max, Math.floor(Number(value)))) : fallback;
 const fail = (message) => Object.assign(new Error(message), { statusCode: 400 });
@@ -91,7 +92,7 @@ export function createSharedMemory({ file, now = Date.now, sanitize = (s) => s }
     const account = qq(input.accountQQ), actor = qq(input.actorQQ);
     if (!account || !actor || !/^(group|private|qzone):[1-9]\d*(?::.*)?$/.test(input.source || '')) return null;
     const content = clean(input.text); if (!content.trim()) return null;
-    const id = 'e_' + hash(JSON.stringify([account, input.source, String(input.externalId || crypto.randomUUID())])).slice(0, 32);
+    const id = memoryEventId(account, input.source, input.externalId || crypto.randomUUID());
     if (forgotten(account, id)) return null;
     const existing = open().prepare('SELECT status FROM events WHERE id=? AND account=?').get(id, account);
     if (existing && !(existing.status === 'uncertain' && input.status === 'sent')) return id;
@@ -115,7 +116,7 @@ export function createSharedMemory({ file, now = Date.now, sanitize = (s) => s }
       return id;
     });
   }
-  function remember(accountQQ, input, origin = 'model') {
+  function remember(accountQQ, input, origin = 'model', eventAllowed = () => true) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('记忆格式无效');
     const account = qq(accountQQ), kind = String(input.kind), person = qq(input.personQQ);
     const content = clean(input.text, 600).trim();
@@ -125,6 +126,7 @@ export function createSharedMemory({ file, now = Date.now, sanitize = (s) => s }
     if (input.personQQ != null && !person) throw fail('人物 QQ 无效');
     const rows = evidence.map((id) => open().prepare('SELECT * FROM events WHERE id=? AND account=?').get(String(id), account));
     if (rows.some((r) => !r || r.status === 'uncertain')) throw fail('依据不存在、已遗忘或发送结果尚未确认');
+    if (rows.some(r => eventAllowed(eventView(r)) !== true)) throw fail('依据当前不可访问');
     if (person && person !== account && !evidence.some((id) => open().prepare('SELECT 1 FROM people WHERE event_id=? AND qq=?').get(id, person))) throw fail('人物 QQ 必须出现在依据中');
     const fingerprint = 'n_' + hash(JSON.stringify([account, kind, person, content])).slice(0, 32);
     const id = input.id ? String(input.id) : fingerprint;
@@ -155,12 +157,14 @@ export function createSharedMemory({ file, now = Date.now, sanitize = (s) => s }
       WHERE memory_search MATCH ? AND (e.account=? OR n.account=?) ORDER BY rank LIMIT 300`)
       .all(terms.map((t) => '"' + t + '"').join(' OR '), account, account).map((r) => r.id);
     const matched = new Set(matches);
+    const allowed = typeof options.eventAllowed === 'function' ? options.eventAllowed : () => true;
     let sql = 'SELECT * FROM events WHERE account=? AND happened>=?', args = [account, since];
     if (persons.length) { sql += ` AND id IN (SELECT event_id FROM people WHERE qq IN (${persons.map(() => '?').join(',')}))`; args.push(...persons); }
     const recent = open().prepare(sql + ' ORDER BY observed DESC,seq DESC LIMIT 150').all(...args);
     const older = matches.length ? open().prepare(`SELECT * FROM events WHERE account=? AND happened>=? AND id IN (${matches.map(() => '?').join(',')})`).all(account, since, ...matches) : [];
     const events = [...new Map([...recent, ...older].map((r) => [r.id, r])).values()]
       .filter((r) => !options.strictQuery || !terms.length || matched.has(r.id))
+      .filter((r) => allowed(eventView(r)) === true)
       .filter((r) => !persons.length || open().prepare(`SELECT 1 FROM people WHERE event_id=? AND qq IN (${persons.map(() => '?').join(',')})`).get(r.id, ...persons))
       .sort((a, b) => Number(matched.has(b.id)) - Number(matched.has(a.id)) || b.observed - a.observed || b.seq - a.seq)
       .slice(0, limit).map(eventView);
@@ -170,6 +174,10 @@ export function createSharedMemory({ file, now = Date.now, sanitize = (s) => s }
     const matchedNotes = matches.length ? open().prepare(`SELECT * FROM notes WHERE account=?${noteStatus} AND id IN (${matches.map(() => '?').join(',')})`).all(account, ...matches) : [];
     const rows = [...new Map([...recentNotes, ...matchedNotes].map((r) => [r.id, r])).values()];
     const notes = rows.filter((r) => (!persons.length || !r.person || persons.includes(r.person))
+      && JSON.parse(r.evidence).every(id => {
+        const event = open().prepare('SELECT * FROM events WHERE id=? AND account=?').get(id, account);
+        return event && allowed(eventView(event)) === true;
+      })
       && (!options.automatic || !r.mentioned || now() - r.mentioned >= 6 * 3600000)
       && (!options.automatic || !r.due || r.due <= now())
       && (!options.strictQuery || !terms.length || matched.has(r.id)))
@@ -252,6 +260,6 @@ export function createSharedMemory({ file, now = Date.now, sanitize = (s) => s }
     workerState() { const row = open().prepare("SELECT value FROM worker_state WHERE key='worker'").get(); return row ? JSON.parse(row.value) : null; },
     saveWorkerState(value) { open().prepare("INSERT INTO worker_state VALUES('worker',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(value)); },
     history(account, id) { return open().prepare('SELECT snapshot FROM note_history WHERE account=? AND note_id=? ORDER BY seq DESC LIMIT 10').all(qq(account), String(id)).map((r) => JSON.parse(r.snapshot)); },
-    remember: (account, input, origin) => transaction(() => remember(account, input, origin)),
+    remember: (account, input, origin, eventAllowed) => transaction(() => remember(account, input, origin, eventAllowed)),
     close() { if (db) { db.close(); db = null; } } };
 }

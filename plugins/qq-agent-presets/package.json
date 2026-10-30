@@ -12,7 +12,8 @@
         "./presets/qq-chat-v2-files.patch.yml",
         "./presets/qq-qzone.patch.yml",
         "./presets/qq-memory.patch.yml",
-        "./presets/qq-unified.patch.yml"
+        "./presets/qq-unified.patch.yml",
+        "./presets/qq-summary.patch.yml"
       ]
     }
   }
