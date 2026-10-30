@@ -400,3 +400,22 @@ node --test --test-reporter=dot scripts/test-unified-foundation.mjs scripts/test
 下一步优先将适配器接到可隔离测试的 bridge 维护入口：在任何解析后异步分支前保存可信入站，审计所有旧模型投递和本地状态写入、后台空间/记忆任务，建立真实独占及可信账号归属证明。不能在仅包住部分入口时开启在线采集。acquire 目前等待宿主旧工作完成，没有生产维护超时/操作员恢复路由；后续接线需补这一点，超时也不得清除持久 barrier。接线还要保证源事件正文完整、时间稳定，不用当前时间替代重试事件时间。
 
 之后完成原文恢复与重叠对账、已读反向映射、旧状态增量回滚写入、未知动作人工核对和显式激活验收。现有 rollbackPlan 仍不可应用；本轮是隔离链路贯通，不是生产切换完成。全局主动机会、局部记忆整合、关系通知/成员状态刷新、媒体文件工具及真实 DSH/ACL 验收等旧待办继续保留。
+
+## 2026-10-31 停稳期限与桥接入口审计（01:30 续作）
+
+从 da1ecaa 继续，备份 codex/backup-unified-quiesce-20261031。开工五小时剩余 34%、周剩余 47%，未使用重置权益。未接生产维护入口，未改生产模式和服务，用户未提交文件保留。
+
+createMigrationBarrier.acquire 现在有贯穿整个获取过程的单一单调时钟期限，默认 30 秒，允许 1–60000ms，超时返回 MIGRATION_QUIESCE_TIMEOUT。旧操作、空闲查询和 flush 共用这一期限，不是每步重新开始计时。超时不会解除持久 barrier 或人工暂停；外部空闲/flush 回调仍被登记，下一次获取必须先等它完成，防止迟到 flush 和新快照交错。迟到空闲结果不再启动下一步 flush。没有取消正在执行的外部写入或伪称其已停止。
+
+新增 3 项测试，模拟旧工作不结束、迟到空闲回复、迟到 flush，以及超时后持久收件、重试和非法时间参数。完整相关组合 **370 项通过**（state/probes/unified-quiesce-full-tests.log）；语法及 diff 检查通过。
+
+### bridge.js 实际接线审计：以下尚未实施，不能宣称已冻结生产
+
+- handleIncoming 先做 modeAllowed，随后 reserved2 分支在任何 await 前调用 sharedMemory.record，再做 segmentsToText、引用与媒体解析。维护分流应放在可信连接/账号及准入核验之后、sharedMemory.record 之前；仅包裹 scheduleWakeV2 太晚。原 message_id/msg_id/message_seq 和 event.time 必须稳定保留，无时间/ID的随机回退不能直接作为迁移重复投递依据。原始消息段/媒体需要完整保存，不能只保存解析后200字预览。
+- onPrivateMessage/onGroupMessage 排除自身消息，好友申请 onRequest、拍一拍 handlePokeNotice 是独立入口；维护期间必须有明确保存/延后策略，不能只处理两个消息订阅。OneBot onEvent 当前是健康旁路，不是可替代主入口的已鉴权持久收件器。
+- legacyPrompt 是最终旧模型投递入口，目前只检查启动固定 unifiedConfigured。必须另加运行期间维护屏障与在途统计，同时审计 slang 队列、memoryWorker、qzoneService/agent 和 DSH 回帧引发的写入。只拦 prompt 不能阻止已有任务回帧写状态。
+- scheduleWakeV2、睡眠/回复检查/主动/限流重试定时器、peakSleepTickV2 和 socialLoopTick 各有独立调度；统一关闭它们不能修改用户原 wakeConfig/sleepUntil/paused。已有定时任务应暂停执行并保留原数据，不能通过清空数据模拟停稳。
+- saveSocialV2State 内部 catch 只记日志，不把写入失败交给调用方。直接调用后返回 true 不构成可靠 flush；接线前需要严格保存路径或经核验的写入结果，连同会话、空间、初始提示词等源文件写入一起纳入屏障。
+- 管理控制台、角色/预设编辑、token/端点自愈也可能修改快照覆盖文件；DSH 空闲不等于所有源文件停稳。需审计这些独立来源，或在采集期间明确拒绝写入且保留原权限。不能依据当前登录推断旧文件账号，也不能跳过真实独占/ACL。
+
+下一轮按以上入口实施可隔离验证的宿主协调，而不是先开放 acquire 路由。原文恢复、重叠对账、增量回滚写入、已读反向映射和激活验收仍未完成；生产继续关闭统一模式。额度不足时按最新重置时间调度，先核验实际配置再记录。

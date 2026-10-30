@@ -150,8 +150,9 @@ export class MigrationIngress {
 // Event-loop adapter for a future bridge maintenance route. Every relevant
 // legacy writer/dispatch must pass runLegacy, every admitted inbound pass ingest.
 // It is intentionally NOT enabled in bridge.js until those call sites are audited.
-export function createMigrationBarrier({ journal, currentIdentity, assertLegacyIdle, flushLegacy }) {
+export function createMigrationBarrier({ journal, currentIdentity, assertLegacyIdle, flushLegacy, timeoutMs = 30000 }) {
   if (![currentIdentity, assertLegacyIdle, flushLegacy].every(fn => typeof fn === 'function')) throw fail('MIGRATION_HOST_ADAPTER_REQUIRED');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw fail('MIGRATION_INVALID_TIMEOUT');
   const running = new Set();
   let acquiring = false;
   function track(operation) {
@@ -175,14 +176,33 @@ export function createMigrationBarrier({ journal, currentIdentity, assertLegacyI
     async acquire() {
       if (acquiring) throw fail('MIGRATION_LEASE_BUSY');
       acquiring = true;
+      const deadline = performance.now() + timeoutMs;
+      const remaining = () => {
+        const value = deadline - performance.now();
+        if (value <= 0) throw fail('MIGRATION_QUIESCE_TIMEOUT');
+        return value;
+      };
+      const wait = async promise => {
+        let timer;
+        try {
+          const value = await Promise.race([promise, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(fail('MIGRATION_QUIESCE_TIMEOUT')), remaining());
+          })]);
+          remaining(); return value;
+        } finally { clearTimeout(timer); }
+      };
       try {
         const expected = identity(currentIdentity());
         journal.begin(expected); // Durable routing barrier precedes every await.
-        await Promise.all([...running]);
+        await wait(Promise.all([...running]));
         journal.assertReady(currentIdentity());
-        if (await assertLegacyIdle() !== true) throw fail('LEGACY_SESSION_BUSY');
+        // Timed-out external callbacks remain tracked. A retry must drain them
+        // before it can claim quiescence, even if the caller has stopped waiting.
+        remaining();
+        if (await wait(track(assertLegacyIdle)) !== true) throw fail('LEGACY_SESSION_BUSY');
         journal.assertReady(currentIdentity());
-        if (await flushLegacy() !== true) throw fail('MIGRATION_NOT_QUIESCED');
+        remaining();
+        if (await wait(track(flushLegacy)) !== true) throw fail('MIGRATION_NOT_QUIESCED');
         journal.assertReady(currentIdentity());
         let released = false;
         return {

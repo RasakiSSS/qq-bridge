@@ -79,6 +79,51 @@ test('failed preflight and identity change retain routing lock without claiming 
   assert.throws(() => barrier.ingest(event(), () => {}), { code: 'MIGRATION_SOURCE_CHANGED' });
 });
 
+test('quiescence timeout keeps durable routing and drains late legacy work before retry', async t => {
+  const f = fixture(t); let finish, idleChecks = 0;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const barrier = createMigrationBarrier({ journal: f.journal, currentIdentity: who, timeoutMs: 200,
+    assertLegacyIdle: () => { idleChecks++; return true; }, flushLegacy: () => true });
+  const old = barrier.runLegacy(() => waiting);
+  await assert.rejects(barrier.acquire(), { code: 'MIGRATION_QUIESCE_TIMEOUT' });
+  assert.equal(idleChecks, 0); assert.equal(f.journal.active(), true);
+  assert.equal((await barrier.ingest(event(), () => assert.fail('legacy delivery'))).durable, true);
+  assert.throws(() => barrier.runLegacy(() => {}), { code: 'MIGRATION_PENDING' });
+  finish(); await old;
+  const lease = await barrier.acquire(); assert.equal(lease.assert().quiesced, true); lease.release();
+});
+
+test('late idle response after timeout cannot trigger flush and stays tracked across retries', async t => {
+  const f = fixture(t); let finish, idleChecks = 0, flushes = 0;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const barrier = createMigrationBarrier({ journal: f.journal, currentIdentity: who, timeoutMs: 200,
+    assertLegacyIdle: () => { idleChecks++; return idleChecks === 1 ? waiting : true; },
+    flushLegacy: () => { flushes++; return true; } });
+  await assert.rejects(barrier.acquire(), { code: 'MIGRATION_QUIESCE_TIMEOUT' });
+  await assert.rejects(barrier.acquire(), { code: 'MIGRATION_QUIESCE_TIMEOUT' });
+  assert.equal(idleChecks, 1); assert.equal(flushes, 0);
+  finish(true); await waiting;
+  const lease = await barrier.acquire(); assert.equal(flushes, 1); lease.release();
+});
+
+test('late flush must finish before another acquisition, and invalid deadlines cannot open barrier', async t => {
+  const f = fixture(t); let finish, flushes = 0, idleChecks = 0;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const options = { journal: f.journal, currentIdentity: who,
+    assertLegacyIdle: () => { idleChecks++; return true; },
+    flushLegacy: () => { flushes++; return flushes === 1 ? waiting : true; } };
+  for (const timeoutMs of [0, -1, Infinity, 60001, 1.5]) {
+    assert.throws(() => createMigrationBarrier({ ...options, timeoutMs }), { code: 'MIGRATION_INVALID_TIMEOUT' });
+  }
+  assert.equal(f.journal.active(), false);
+  const barrier = createMigrationBarrier({ ...options, timeoutMs: 200 });
+  await assert.rejects(barrier.acquire(), { code: 'MIGRATION_QUIESCE_TIMEOUT' });
+  await assert.rejects(barrier.acquire(), { code: 'MIGRATION_QUIESCE_TIMEOUT' });
+  assert.equal(flushes, 1); assert.equal(idleChecks, 1);
+  finish(true); await waiting;
+  const lease = await barrier.acquire(); assert.equal(flushes, 2); lease.release();
+});
+
 test('conflicts arriving during idle check block the snapshot but remain durable with later messages', async t => {
   const f = fixture(t);
   const barrier = createMigrationBarrier({ journal: f.journal, currentIdentity: who,
