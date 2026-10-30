@@ -29,7 +29,7 @@ export class UnifiedStore {
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
       const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
       if ((id !== 0 && id !== APPLICATION_ID) || (id === 0 && (tables.length || version !== 0))
-          || (id === APPLICATION_ID && ![1, 2, 3, 4, 5].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
+          || (id === APPLICATION_ID && ![1, 2, 3, 4, 5, 6].includes(version))) throw fail('INVALID_STORE', '账本身份或版本不匹配，保留原文件');
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;');
       if (id === 0) this.transaction(() => this.db.exec(`
         CREATE TABLE accounts (
@@ -132,6 +132,17 @@ export class UnifiedStore {
         PRAGMA user_version=5;
       `));
       this.db.prepare('SELECT id,account,main_session,call_id,fingerprint,worker_session,scene,input,phase,create_attempted,retired,retry_at,created FROM summary_jobs LIMIT 0').all();
+      if (version < 6) this.transaction(() => this.db.exec(`
+        CREATE TABLE migration_imports(account TEXT PRIMARY KEY REFERENCES accounts(account), snapshot TEXT NOT NULL UNIQUE,
+          phase TEXT NOT NULL CHECK(phase IN ('staged','ready')), source_paused INTEGER NOT NULL, imported_at INTEGER NOT NULL);
+        CREATE TABLE migration_sources(account TEXT NOT NULL REFERENCES migration_imports(account), scene TEXT NOT NULL,
+          source_id TEXT NOT NULL, legacy_seq INTEGER NOT NULL, event_seq INTEGER REFERENCES events(seq),
+          read_state TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(account,scene,source_id));
+        CREATE TABLE migration_preserved(account TEXT NOT NULL REFERENCES migration_imports(account), category TEXT NOT NULL,
+          payload TEXT NOT NULL, PRIMARY KEY(account,category));
+        PRAGMA user_version=6;
+      `));
+      this.db.prepare('SELECT account,snapshot,phase,source_paused,imported_at FROM migration_imports LIMIT 0').all();
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     } catch (error) { this.db.close(); throw error; }
   }

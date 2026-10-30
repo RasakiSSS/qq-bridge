@@ -34,6 +34,7 @@ export class UnifiedSummary {
     return this.store.transaction(() => {
       this.store.scene(ctx.account, key);
       const all = this.store.unread(ctx.account, key, limit).filter(row => row.kind !== 'summary-result'), events = [], messages = [];
+      if (all.some(row => JSON.parse(row.payload).originalUnavailable === true)) throw fail('SUMMARY_SOURCE_INCOMPLETE');
       for (const row of all) {
         const payload = JSON.parse(row.payload), candidate = { seq: row.seq, payload };
         if (Buffer.byteLength(JSON.stringify([...messages, candidate])) > 22000) break;

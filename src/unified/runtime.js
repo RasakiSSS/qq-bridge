@@ -140,6 +140,7 @@ export class UnifiedRuntime {
       currentScene: state.current_scene, sessionId: state.session_id, retryAt: state.retry_at,
       dispatch: this.store.active(ctx.account)?.status || 'idle',
       counts: { ...counts }, summaries: Object.fromEntries(phases.map(row => [row.phase, row.count])),
+      migration: db.prepare('SELECT phase FROM migration_imports WHERE account=?').get(ctx.account)?.phase ?? null,
       pendingTimers: db.prepare('SELECT COUNT(*) AS count FROM wake_timers WHERE account=? AND event_seq IS NULL').get(ctx.account).count };
   }
   wakeConfig(key) { this.#context(); return this.attention.config(key); }

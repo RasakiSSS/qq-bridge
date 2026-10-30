@@ -146,3 +146,11 @@ test('cold recovery reads fixed-cut pages without resubmission and retires only 
   assert.deepEqual(archived, [job.worker_session]); assert.equal(f.prompts.length, 1);
   assert.equal(resumed.get(job.id).status, 'ready');
 });
+
+test('summary worker refuses legacy preview without creating a job or advancing unread', async t => {
+  const f = fixture(t);
+  f.store.db.prepare("UPDATE events SET payload=? WHERE account='100'").run(JSON.stringify({ text: 'preview', originalUnavailable: true }));
+  await assert.rejects(f.start(), { code: 'SUMMARY_SOURCE_INCOMPLETE' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM summary_jobs').get().n, 0);
+  assert.equal(f.prompts.length, 0);
+});

@@ -4496,7 +4496,7 @@ function updateOverview(status, modeLabel) {
   unified.hidden = !status.unified?.enabled;
   const u = status.unified;
   if (u?.enabled) unified.textContent = u.ready
-    ? `统一主会话 · ${u.permission} · ${u.paused ? '已暂停' : '运行中'} · ${u.peak ? '峰期' : '谷期'} · 当前 ${u.currentScene || '主菜单'} · 未读 ${u.counts.unread} · 调度 ${u.dispatch} · 待到期提醒 ${u.pendingTimers}`
+    ? `统一主会话 · ${u.permission} · ${u.migration === 'staged' ? '待迁移验收' : u.paused ? '已暂停' : '运行中'} · ${u.peak ? '峰期' : '谷期'} · 当前 ${u.currentScene || '主菜单'} · 未读 ${u.counts.unread} · 调度 ${u.dispatch} · 待到期提醒 ${u.pendingTimers}`
     : '统一主会话已配置，等待账号与运行器就绪';
   renderSnowlumaHealth(status.snowluma);
   document.getElementById('metricMode').textContent = modeLabel.replace('模式', '');

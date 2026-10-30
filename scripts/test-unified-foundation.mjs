@@ -38,6 +38,20 @@ function fixture(t, options = {}) {
   };
   return f;
 }
+
+test('legacy previews remain unread after read receipt; only explicit skip can acknowledge them', async t => {
+  const f = fixture(t);
+  f.add('group:300', 'preview', { payload: { text: 'truncated', originalUnavailable: true } });
+  f.add('group:300', 'full');
+  const current = await f.scenes.join('group:300');
+  const read = f.scenes.read(current.capability);
+  assert.equal(read.incompleteSeqs.length, 1);
+  assert.equal(f.scenes.markRead(read.receipt).marked, 1);
+  assert.equal(f.count('group:300'), 1);
+  assert.throws(() => f.scenes.summary('group:300'), { code: 'SUMMARY_SOURCE_INCOMPLETE' });
+  assert.equal(f.scenes.markRead(read.skipReceipt).reason, 'intentional-skip');
+  assert.equal(f.count('group:300'), 0);
+});
 function databaseFile() {
   const temp = path.resolve(os.tmpdir());
   const dir = fs.mkdtempSync(path.join(temp, 'unified-foundation-'));

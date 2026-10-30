@@ -54,7 +54,7 @@ const definitions = {
   qq_get_current_session: ['查看当前场景及有效场景凭证；没有进入时返回 null。', {}],
   qq_join_session: ['进入群聊、私聊或空间。峰期禁止新进入普通场景，失败保留原场景。', { key }],
   qq_quit_session: ['退出当前场景并返回主菜单。峰期退出后不能重新进入普通场景。', {}],
-  qq_get_unread_msg: ['读取当前场景原文，默认一批 30 条；不会自动标记已读。', { capability: handle, limit }],
+  qq_get_unread_msg: ['读取当前场景原文，默认一批 30 条；不会自动标记已读。incompleteSeqs 表示只有旧预览，read 回执不覆盖这些消息；若明确决定略过可使用额外 skipReceipt。', { capability: handle, limit }],
   qq_mark_read: ['确认已读或明确略过回执中的消息；不会清除回执之后到达的消息。', { receipt: handle }],
   qq_qzone_publish: ['在已进入的空间发表文字说说；可见范围、每日额度和间隔由可信配置决定。unknown 时禁止重复发送。', qzoneText],
   qq_qzone_comment: ['评论空间收件箱中已提供的说说，postKey 使用消息 payload.key；@ 使用 mentions。unknown 时禁止重复发送。', { ...qzoneText, postKey: z.string().min(1).max(500) }],
@@ -238,9 +238,9 @@ export class UnifiedTools {
   }
 }
 
-const errors = new Set(['UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
+const errors = new Set(['MIGRATION_PENDING', 'UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
   'PERSONA_CHANGED', 'PERSONA_UNAVAILABLE',
-  'SUMMARY_INPUT_TOO_LARGE', 'SUMMARY_NOT_READY',
+  'SUMMARY_INPUT_TOO_LARGE', 'SUMMARY_NOT_READY', 'SUMMARY_SOURCE_INCOMPLETE',
   'FILES_UNAVAILABLE', 'FILE_PATH_DENIED',
   'REQUEST_UNAVAILABLE',
   'ACTION_DENIED', 'ACTION_ID_CONFLICT', 'INVALID_CALL_ID',

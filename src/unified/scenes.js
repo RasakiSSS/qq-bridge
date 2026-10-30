@@ -39,6 +39,7 @@ export class UnifiedScenes {
   }
   active(ctx = this.context(), required = 'v1') {
     const row = this.state(ctx);
+    if (this.store.db.prepare("SELECT 1 FROM migration_imports WHERE account=? AND phase='staged'").get(ctx.account)) throw fail('MIGRATION_PENDING');
     if (ctx.enabled === false || ctx.paused === true || row.paused) throw fail('PAUSED', '统一活动已暂停');
     if (!Object.hasOwn(levels, required) || levels[row.permission] < levels[required]) throw fail('PERMISSION_DENIED');
     return row;
@@ -161,15 +162,19 @@ export class UnifiedScenes {
     const cap = this.authorize(capability); batchSize(limit);
     return this.store.transaction(() => {
       const events = this.store.unread(cap.account, cap.key, limit);
+      const incomplete = events.filter(e => JSON.parse(e.payload).originalUnavailable === true);
       return { key: cap.key, messages: events.map((e) => ({ seq: e.seq, payload: JSON.parse(e.payload) })),
         remaining: this.store.counts(cap.account).find((x) => x.scene === cap.key).unread - events.length,
-        receipt: this.store.receipt(cap.account, cap.key, 'read', events, this.now()) };
+        receipt: this.store.receipt(cap.account, cap.key, 'read', events.filter(e => !incomplete.includes(e)), this.now()),
+        ...(incomplete.length ? { incompleteSeqs: incomplete.map(e => e.seq),
+          skipReceipt: this.store.receipt(cap.account, cap.key, 'skip', incomplete, this.now()) } : {}) };
     });
   }
   summary(key, limit = 30) {
     const ctx = this.context(); this.requireVisible(key, ctx); batchSize(limit);
     return this.store.transaction(() => {
       const events = this.store.unread(ctx.account, key, limit);
+      if (events.some(e => JSON.parse(e.payload).originalUnavailable === true)) throw fail('SUMMARY_SOURCE_INCOMPLETE');
       this.store.scene(ctx.account, key);
       return { key, messages: events.map((e) => ({ seq: e.seq, payload: JSON.parse(e.payload) })),
         remaining: this.store.counts(ctx.account).find((x) => x.scene === key).unread - events.length,
@@ -185,6 +190,8 @@ export class UnifiedScenes {
     return this.store.transaction(() => {
       const row = this.store.db.prepare("SELECT id FROM receipts WHERE id=? AND kind='summary' AND status='pending'").get(job);
       if (!row) return false;
+      const rows = this.store.db.prepare('SELECT e.payload FROM events e JOIN receipt_events r ON r.seq=e.seq WHERE r.receipt=?').all(job);
+      if (rows.some(e => JSON.parse(e.payload).originalUnavailable === true)) throw fail('SUMMARY_SOURCE_INCOMPLETE');
       const cover = this.store.db.prepare('UPDATE receipt_events SET covered=1 WHERE receipt=? AND seq=?');
       for (const seq of coveredSeqs) if (cover.run(job, seq).changes !== 1) throw fail('INVALID_SUMMARY_RANGE');
       this.store.db.prepare("UPDATE receipts SET result=?,status='ready' WHERE id=?").run(body, job);
