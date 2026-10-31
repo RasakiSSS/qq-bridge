@@ -152,3 +152,11 @@ test('real startup fence refuses configuration-only rollback and corrupt control
   assert.equal(fs.readFileSync(corrupt, 'utf8'), 'not a database');
   assert.doesNotThrow(() => assertMigrationStartup(path.join(f.root, 'absent.sqlite'), false));
 });
+
+test('a journal missing committed source rows cannot report a completed delivery cursor', async t => {
+  const f = await fixture(t); f.activate();
+  persistUnifiedIngress(f.options(), event('one')); persistUnifiedIngress(f.options(), event('two'));
+  f.journal.db.prepare('DELETE FROM incoming WHERE seq=1').run();
+  assert.throws(() => replayUnifiedIngress(f.options()), { code: 'MIGRATION_CONFLICT' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, 2);
+});

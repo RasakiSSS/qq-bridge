@@ -13,6 +13,7 @@ import { assertLegacySessionsIdle } from '../src/unified/bridge-driver.js';
 import { projectLegacyQqRollback, writeLegacyQqRollback } from '../src/unified/migration-reverse.js';
 import { activateStagedMigration } from '../src/unified/migration-activate.js';
 import { UnifiedRuntime } from '../src/unified/runtime.js';
+import { replayUnifiedIngress } from '../src/unified/migration-live-ingress.js';
 
 // Real persistence/runtime/tools, synthetic DSH transport, ownership and ACL.
 // No production process, network model, or QQ send is used.
@@ -31,6 +32,7 @@ test('isolated migration runs unified tools after gated activation and restores 
     journal = new MigrationIngress({ file: path.join(privateRoot, 'ingress.sqlite'), verifyPrivate: () => true, assertExclusive: () => true });
     let flushes = 0;
     const barrier = createMigrationBarrier({ journal, currentIdentity: identity,
+      replayPersisted: () => runtime ? replayUnifiedIngress({ journal, store: runtime.store, current: identity(), wakeAllowed: () => true }) : null,
       assertLegacyIdle: async () => {
         await assertLegacySessionsIdle({ sessions: { list: async () => ({ result: { ok: true, value: { items: [] } } }) } }, []);
         return true;
@@ -149,6 +151,8 @@ test('isolated migration runs unified tools after gated activation and restores 
       events: { follow() {} } },
     });
     assert.equal((await runtime.tick()).status, 'paused'); assert.equal(prompts.length, 0);
+    await barrier.ingest({ ...incoming, sourceId: 'after-cutover', at: 5000 }, () => assert.fail('cutover returned to old handler'));
+    assert.equal(runtime.store.db.prepare("SELECT unread FROM events WHERE source_id='after-cutover'").get().unread, 1);
     // Explicit operator resume in this fixture, never automatic valley resume.
     runtime.scenes.setPaused(false);
     assert.equal((await runtime.tick()).status, 'accepted');
@@ -168,7 +172,7 @@ test('isolated migration runs unified tools after gated activation and restores 
     assert.deepEqual(final.social.conversations['group:456'].unread.map(m => m.messageId), ['old-message']);
     fs.writeFileSync(destination, originalBytes);
     writeLegacyQqRollback({ ...writeOptions, projection: final });
-    assert.equal(JSON.parse(fs.readFileSync(destination)).conversations['group:456'].recentMessages.length, 3);
+    assert.equal(JSON.parse(fs.readFileSync(destination)).conversations['group:456'].recentMessages.length, 4);
     restarted = await bridgeHarness({ config: { socialV2: { sharedMemory: { enabled: false } } },
       files: { 'state/social-v2.json': fs.readFileSync(destination, 'utf8') } });
     assert.equal(restarted.socialV2.paused, false);

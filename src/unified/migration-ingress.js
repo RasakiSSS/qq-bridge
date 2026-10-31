@@ -75,6 +75,10 @@ export class MigrationIngress {
   assertReady(current) {
     const row = this.assertIdentity(current);
     if (this.db.prepare('SELECT 1 FROM conflicts LIMIT 1').get()) throw fail('MIGRATION_CONFLICT');
+    // This append-only log allocates consecutive integer IDs. A copied or
+    // damaged journal must not retain a cursor beyond missing source rows.
+    const range = this.db.prepare('SELECT COUNT(*) AS count,COALESCE(MAX(seq),0) AS last FROM incoming').get();
+    if (range.count !== range.last || row.transferred < 0 || row.transferred > range.last) throw fail('MIGRATION_CONFLICT');
     return row;
   }
   begin(current) {

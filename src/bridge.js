@@ -1102,7 +1102,7 @@ function consolePortInUse() {
   }
 }
 
-function acquireLock() {
+function acquireLock({ strict = false } = {}) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   // 原子创建锁文件：把 PID 一次性写入（flag 'wx'），避免“先建空文件再写 PID”的窗口被第二个进程当作过期锁偷走。
   const tryCreate = () => {
@@ -1115,6 +1115,9 @@ function acquireLock() {
     }
   };
   if (tryCreate()) return;
+  // Unified migration must never steal a live/uncertain writer during startup.
+  // Even a stale-looking lock requires operator reconciliation, not a port guess.
+  if (strict) throw Object.assign(new Error('统一安装锁已存在；请核验持有进程与迁移状态，不会自动抢锁'), { code: 'MIGRATION_INSTALLATION_LOCKED' });
   // 锁文件已存在：检查 PID 是否仍存活；内容为空视为过期锁（仅兼容旧版本遗留），删除后重试一次。
   let stale = false;
   try {
@@ -1419,7 +1422,8 @@ async function main() {
   const unifiedConsoleRequests = new WeakSet();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
-  acquireLock();
+  assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured);
+  acquireLock({ strict: unifiedConfigured });
   assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured);
   loadState();
 
