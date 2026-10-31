@@ -1676,7 +1676,9 @@ async function main() {
   async function deliverUnifiedQzone(input) {
     if (unifiedQzoneClosing || input.accountQQ !== selfUserId || unifiedLoginPending || !snowlumaHealth.connected) throw new Error('空间账号连接已变化');
     const { accountQQ, sourceId, ...event } = input;
-    await unifiedDriver.ingest({ ...event, key: 'qzone', sourceId: crypto.createHash('sha256').update(sourceId).digest('hex') });
+    // Match migration's stable post/comment key; hashing only the live path
+    // would duplicate imported unread events on the next collection.
+    await unifiedDriver.ingest({ ...event, key: 'qzone', sourceId });
   }
 
   // ── 表情包体系（二代仿真）本地知识库 ────────────────────────────────────

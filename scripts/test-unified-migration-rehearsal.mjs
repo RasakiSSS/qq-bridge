@@ -120,6 +120,13 @@ test('isolated migration runs unified tools after gated activation and restores 
     assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_NOT_QUIESCED' });
     assert.throws(() => reverse(), { code: 'MIGRATION_NOT_QUIESCED' });
     store.db.prepare("UPDATE runtime_owners SET owner_id=NULL WHERE account='100'").run();
+    const basePayload = store.db.prepare("SELECT payload FROM events WHERE source_id='old-message'").get().payload;
+    store.db.prepare("UPDATE events SET payload=? WHERE source_id='old-message'").run(JSON.stringify({ text: 'corrupt copy' }));
+    assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_CONFLICT' });
+    assert.equal(store.db.prepare('SELECT phase FROM migration_imports').get().phase, 'staged');
+    assert.equal(store.db.prepare("SELECT 1 FROM migration_preserved WHERE category='cutover'").get(), undefined);
+    store.db.prepare("UPDATE events SET payload=? WHERE source_id='old-message'").run(basePayload);
+    assert.throws(() => activateStagedMigration({ ...activation, lease: { assert: () => ({ ...identity(), epoch: 'other', quiesced: true }) } }), { code: 'MIGRATION_SOURCE_CHANGED' });
     const activated = activateStagedMigration(activation);
     assert.equal(activated.phase, 'ready'); assert.equal(activated.paused, true);
     assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_ALREADY_ACTIVATED' });

@@ -480,3 +480,9 @@ migration-reverse新增空间分区投影：分别合并动态/评论，自己�
 验证：完整相关380项通过（unified-cutover-full-tests.log）；随后补充来源完整性检查和无messageId用例，迁移及旧权限安全42项通过（unified-cutover-final-tests.log）。本轮新增的激活与回写仅在合成夹具运行。所有用户人格/角色修改原样保留。
 
 下一步优先接宿主维护/恢复路由的完整停稳与持久收件切换，而不是继续声称只有测试：目前入口全覆盖、真实独占/ACL/可信旧账号、原文恢复和重叠对账、QQ+空间多文件可恢复提交、不可逆新动作证据传回旧模式、大容量回退仍待完成。当前演练证明QQ路径的隔离运行与重新加载，不是生产整体切换已验收；空间反向只完成文档投影。未知动作绝不重发，未授权生产启用。其他既有产品待办仍按前述清单保留。
+
+### 同轮额度交接补充
+
+最近核验5小时剩余15%、周剩余17%，停止新开发并提交交接。切换路径审计发现deliverUnifiedQzone原先哈希sourceId，而迁移保留原键，会把同一动态再次入库。已改实时收件保留相同稳定键，真实桥接测试直接查询隔离账本核验；桥接与闭环22项通过（unified-source-key-tests.log）。补充激活源正文损坏、代次改变的失败用例，失败不写ready/cutover。此前带哈希的隔离开发账本不自动删除或升级；生产统一模式未启用，后续如复用这些旧实验库需显式对账。
+
+下一步收件切换的具体问题：目前cutover只记录统一账本，生产handleIncoming仍按启动时unifiedConfigured分支；journal仍active，importMigrationDeltas只接受staged。必须实现提交决定后、重启后和统一runtime暂不可用时仍先持久保存的新收件路由，并按稳定ID重放，不可简单在activate后清journal或直接调用易失败的runtime.ingest导致漏件。handleUnifiedIncoming缺时间时用Date.now、空间collect缺时间时用now，迁移路径不能照搬这些不稳定重试时间。仍须维护中拒绝旧写入、严格源归属和全入口覆盖。

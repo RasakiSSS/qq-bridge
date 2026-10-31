@@ -303,6 +303,12 @@ test('unified Qzone collection enters durable main inbox without standalone sess
   assert.equal(h.qzoneAgent, null);
   h.setReady(false); // Collection is independent of DSH availability.
   assert.equal((await h.pollUnifiedQzone()).status, 'collected');
+  const sourceDb = new DatabaseSync(path.join(h.temp, 'state/unified.sqlite'), { readOnly: true });
+  try {
+    const row = sourceDb.prepare("SELECT source_id,payload FROM events WHERE scene='qzone'").get();
+    assert.equal(row.source_id, JSON.parse(row.payload).key);
+    assert.equal(row.source_id, 'post:999:post');
+  } finally { sourceDb.close(); }
   h.setReady(true); assert.equal((await h.unifiedDriver.tick()).status, 'idle');
   assert.equal(h.calls.created.length, 0);
   // Ordinary feeds are available when the main session is woken elsewhere.
