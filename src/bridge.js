@@ -8863,6 +8863,39 @@ async function main() {
     }
   }
 
+  // Detached construction: no registration, timers or persistence side effects.
+  function createSocialV2State() {
+    return {
+      wakeConfig: defaultWakeConfigV2(),
+      recentMessages: [],
+      unread: [],
+      lastWakeReason: '',
+      lastAiReplyAt: 0,
+      lastActionAt: 0,
+      agentToken: crypto.randomBytes(16).toString('hex'),
+      bootstrapSent: false,
+      peakSleepWake: null,
+      wakeTimes: [],
+      sendTimes: [],
+      stickerCollectTimes: [],
+      pendingWakeTimer: null,
+      sleepTimer: null,
+      replyCheckTimer: null,
+      proactiveTimer: null,
+      rateLimitRetryTimer: null,
+      lastIncomingAt: 0,
+      preSleepWaitSatisfiedAt: 0,
+      preSleepWaitObservedAt: 0,
+      preSleepWaitAccumMs: 0,
+      lastUnreadSeq: 0,
+      lastReadThroughSeq: 0,
+      modelSeenSeqs: new Set(),
+      activeTopics: [],
+      pendingThoughts: [],
+      memberImpressions: {}
+    };
+  }
+
   function getSocialV2State(key) {
     // 只允许内部约定的会话 key 格式，并统一成无前导零的正整数形式，防止同一会话分裂成多个状态。
     const canonical = canonicalV2Key(key);
@@ -8874,35 +8907,7 @@ async function main() {
     key = canonical;
     let st = socialV2.conversations.get(key);
     if (!st) {
-      st = {
-        wakeConfig: defaultWakeConfigV2(),
-        recentMessages: [],
-        unread: [],
-        lastWakeReason: '',
-        lastAiReplyAt: 0,
-        lastActionAt: 0,
-        agentToken: crypto.randomBytes(16).toString('hex'),
-        bootstrapSent: false,
-        peakSleepWake: null,
-        wakeTimes: [],
-        sendTimes: [],
-        stickerCollectTimes: [],
-        pendingWakeTimer: null,
-        sleepTimer: null,
-        replyCheckTimer: null,
-        proactiveTimer: null,
-        rateLimitRetryTimer: null,
-        lastIncomingAt: 0,
-        preSleepWaitSatisfiedAt: 0,
-        preSleepWaitObservedAt: 0,
-        preSleepWaitAccumMs: 0,
-        lastUnreadSeq: 0,
-        lastReadThroughSeq: 0,
-        modelSeenSeqs: new Set(),
-        activeTopics: [],
-        pendingThoughts: [],
-        memberImpressions: {}
-      };
+      st = createSocialV2State();
       rememberAgentToken(key, st.agentToken);
       socialV2.conversations.set(key, st);
       scheduleProactiveCheckV2(key);

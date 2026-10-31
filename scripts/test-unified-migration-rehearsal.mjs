@@ -11,13 +11,14 @@ import { importMigrationDeltas } from '../src/unified/migration-delta.js';
 import { UnifiedStore } from '../src/unified/store.js';
 import { assertLegacySessionsIdle } from '../src/unified/bridge-driver.js';
 import { projectLegacyQqRollback, writeLegacyQqRollback } from '../src/unified/migration-reverse.js';
+import { activateStagedMigration } from '../src/unified/migration-activate.js';
+import { UnifiedRuntime } from '../src/unified/runtime.js';
 
-// Forward HALF of the rehearsal. Real bridge/Qzone persistence, but synthetic
-// source ownership, DSH, ACL and ingress routing. No activation or rollback is
-// claimed here, and no production process or source files are used.
-test('isolated forward rehearsal composes bridge saves, Qzone drain, snapshot, ingress and fenced import', async () => {
+// Real persistence/runtime/tools, synthetic DSH transport, ownership and ACL.
+// No production process, network model, or QQ send is used.
+test('isolated migration runs unified tools after gated activation and restores exact QQ read state', async () => {
   const h = await bridgeHarness({ config: { socialV2: { sharedMemory: { enabled: false } } } });
-  let journal, stage, store, qzoneLease;
+  let journal, stage, store, qzoneLease, runtime, restarted;
   try {
     h.socialV2.paused = true;
     const old = h.getSocialV2State('group:456');
@@ -103,9 +104,77 @@ test('isolated forward rehearsal composes bridge saves, Qzone drain, snapshot, i
     fs.writeFileSync(destination, originalBytes);
     assert.throws(() => writeLegacyQqRollback({ ...writeOptions, checkpoint: () => fs.writeFileSync(destination, 'changed externally') }), { code: 'MIGRATION_CONFLICT' });
     assert.equal(fs.readFileSync(destination, 'utf8'), 'changed externally');
+    store.append({ account: '100', scene: 'private:300', sourceId: 'new-scene', kind: 'message', payload: { text: 'new scene', senderQQ: '300' }, at: 3000, wake: false });
+    const beforeScenes = h.socialV2.conversations.size;
+    const newScene = projectLegacyQqRollback({ store, account: '100', social: source, assertExclusive: () => true, createScene: h.createSocialV2State });
+    assert.equal(newScene.social.conversations['private:300'].unread[0].messageId, 'new-scene');
+    assert.equal(newScene.social.conversations['private:300'].sleepTimer, null);
+    assert.equal(h.socialV2.conversations.size, beforeScenes);
+    const lease = await barrier.acquire();
+    const activation = { store, stage, journal, handle, lease };
+    assert.throws(() => activateStagedMigration({ ...activation, lease: { assert: () => ({ ...identity(), quiesced: false }) } }), { code: 'MIGRATION_NOT_QUIESCED' });
+    journal.append(identity(), { ...incoming, sourceId: 'last-before-cutover', at: 4000 });
+    assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_INGRESS_PENDING' });
+    journal.transfer(identity(), stage);
+    store.db.prepare("INSERT INTO runtime_owners(account,owner_id,pid,host,generation) VALUES('100','fixture-active',1,'fixture',1)").run();
+    assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_NOT_QUIESCED' });
+    assert.throws(() => reverse(), { code: 'MIGRATION_NOT_QUIESCED' });
+    store.db.prepare("UPDATE runtime_owners SET owner_id=NULL WHERE account='100'").run();
+    const activated = activateStagedMigration(activation);
+    assert.equal(activated.phase, 'ready'); assert.equal(activated.paused, true);
+    assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_ALREADY_ACTIVATED' });
+    lease.release();
+    assert.throws(() => activateStagedMigration(activation), { code: 'MIGRATION_NOT_QUIESCED' });
+    const ledgerFile = path.join(privateRoot, 'unified.sqlite');
+    store.close(); store = undefined;
+    let sid, token; const prompts = [], ok = value => ({ result: { ok: true, value } });
+    runtime = new UnifiedRuntime({ file: ledgerFile,
+      getContext: () => ({ account: '100', ownerQQ: '200', enabled: true, identityEpoch: 1 }),
+      isAllowed: () => true, isWakeAllowed: () => true, workspaceId: 'shared', configureModel: async () => true,
+      authenticateQQ: async () => false, authenticateConsole: async () => true,
+      bindMainTools: async input => { token = input.token; return true; },
+      readWorkspaces: async () => ({ items: [{ workspaceId: 'shared', sessionIds: sid ? [sid] : [] }], archivedSessionIds: [] }),
+      api: { sessions: {
+        list: async () => ok({ items: sid ? [{ sessionId: sid, formatStatus: 'current', running: false }] : [] }),
+        create: async input => { sid = input.sessionId; return ok({ sessionId: sid }); },
+        prompt: async input => { prompts.push(input); return ok({ accepted: true }); },
+      }, callUnary: async () => ok(sid ? { kind: 'sequenced', asOfSeq: 0, values: { agentPreset: 'qq-unified', inbox: { 'next-step': [], 'next-turn': [] } } } : null),
+      events: { follow() {} } },
+    });
+    assert.equal((await runtime.tick()).status, 'paused'); assert.equal(prompts.length, 0);
+    // Explicit operator resume in this fixture, never automatic valley resume.
+    runtime.scenes.setPaused(false);
+    assert.equal((await runtime.tick()).status, 'accepted');
+    const cap = await runtime.tools.call(token, 'qq_join_session', { key: 'group:456' });
+    const fetched = await runtime.tools.call(token, 'qq_get_unread_msg', { capability: cap.capability });
+    assert.ok(fetched.incompleteSeqs.length > 0);
+    await runtime.tools.call(token, 'qq_mark_read', { receipt: fetched.receipt });
+    await runtime.tools.call(token, 'qq_quit_session', {});
+    let frame = 1;
+    for (const [type, data] of [['turn/start', { turn: 1 }], ['user/message', { source: { kind: 'user', rpcId: prompts[0].requestId } }], ['turn/end', { turn: 1 }]]) {
+      await runtime.onDshFrame({ type: 'session/event', sessionId: sid, event: { type, data, seq: frame++ } });
+    }
+    assert.equal(runtime.store.active('100'), undefined);
+    runtime.close(); runtime = undefined;
+    store = new UnifiedStore(ledgerFile);
+    const final = projectLegacyQqRollback({ store, account: '100', social: source, assertExclusive: () => true, createScene: h.createSocialV2State });
+    assert.deepEqual(final.social.conversations['group:456'].unread.map(m => m.messageId), ['old-message']);
+    fs.writeFileSync(destination, originalBytes);
+    writeLegacyQqRollback({ ...writeOptions, projection: final });
+    assert.equal(JSON.parse(fs.readFileSync(destination)).conversations['group:456'].recentMessages.length, 3);
+    restarted = await bridgeHarness({ config: { socialV2: { sharedMemory: { enabled: false } } },
+      files: { 'state/social-v2.json': fs.readFileSync(destination, 'utf8') } });
+    assert.equal(restarted.socialV2.paused, false);
+    assert.deepEqual(Array.from(restarted.getSocialV2State('group:456').unread, m => m.messageId), ['old-message']);
+    assert.equal(restarted.getSocialV2State('group:456').wakeConfig.mode, 'diving');
+    assert.equal(restarted.getSocialV2State('private:300').unread[0].messageId, 'new-scene');
+    assert.equal(restarted.calls.prompts.length, 0);
+    const overflow = structuredClone(final);
+    overflow.social.conversations['group:456'].unread = Array.from({ length: 101 }, (_, seq) => ({ seq }));
+    assert.throws(() => writeLegacyQqRollback({ ...writeOptions, expectedBytes: fs.readFileSync(destination), projection: overflow }), { code: 'MIGRATION_LEGACY_CAPACITY_EXCEEDED' });
     qzoneLease.release();
     assert.throws(() => barrier.runLegacy(() => {}), { code: 'MIGRATION_PENDING' });
   } finally {
-    store?.close(); stage?.close(); journal?.close(); await h.close();
+    await restarted?.close(); runtime?.close(); store?.close(); stage?.close(); journal?.close(); await h.close();
   }
 });

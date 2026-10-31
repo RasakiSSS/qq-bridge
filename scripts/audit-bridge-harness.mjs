@@ -148,7 +148,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     setConnected(value) { snowlumaHealth.connected = value; },
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
-    getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
+    createSocialV2State, getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,

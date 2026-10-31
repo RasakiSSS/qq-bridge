@@ -11,6 +11,50 @@ import { UnifiedAttention } from '../src/unified/attention.js';
 import { importStagedMigration } from '../src/unified/migration-import.js';
 import { importMigrationDeltas } from '../src/unified/migration-delta.js';
 import { MigrationStage } from '../src/unified/migration-stage.js';
+import { projectLegacyQzoneRollback, projectLegacyQqRollback } from '../src/unified/migration-reverse.js';
+
+test('QQ reverse maps legacy rows without message IDs by verified snapshot sequence', async t => {
+  const f = await fixture(t); f.row.messageId = null;
+  const handle = await f.snapshot(); f.stage.importSnapshot(handle);
+  const store = new UnifiedStore(path.join(f.root, 'reverse-no-id.sqlite'));
+  try {
+    importStagedMigration({ store, stage: f.stage, account: '100', assertExclusive: () => true });
+    const options = { store, account: '100', social: f.social, assertExclusive: () => true };
+    assert.equal(projectLegacyQqRollback(options).social.conversations['group:1'].unread.length, 1);
+    store.db.prepare('UPDATE events SET unread=0').run();
+    assert.equal(projectLegacyQqRollback(options).social.conversations['group:1'].unread.length, 0);
+    assert.equal(f.social.conversations['group:1'].unread.length, 1);
+  } finally { store.close(); }
+});
+
+test('Qzone reverse merge separates own feed and comments, preserves writes and other accounts, retries without duplicates', async t => {
+  const f = await fixture(t), original = structuredClone(f.qzone);
+  f.stage.importSnapshot(f.handle);
+  const store = new UnifiedStore(path.join(f.root, 'reverse-qzone.sqlite'));
+  try {
+    const options = { store, stage: f.stage, account: '100', assertExclusive: () => true };
+    importStagedMigration(options);
+    const key = JSON.stringify(['100', 'own', '', 'c']);
+    f.stage.appendDelta('100', { scene: 'qzone', sourceId: 'post:100:own', kind: 'qzone-feed', at: 10000, payload: { text: 'own', authorQQ: '100' } });
+    f.stage.appendDelta('100', { scene: 'qzone', sourceId: key, kind: 'qzone-comment', at: 10001, payload: { text: 'reply', ownerQQ: '100', authorQQ: '200' } });
+    importMigrationDeltas(options);
+    const reverse = qzone => projectLegacyQzoneRollback({ ...options, qzone });
+    const first = reverse(f.qzone);
+    assert.equal(first.appended, 2);
+    assert.deepEqual(first.qzone.accounts['100'].pendingFeeds, []);
+    assert.ok(first.qzone.accounts['100'].seenFeeds.includes('post:100:own'));
+    assert.equal(first.qzone.accounts['100'].comments[key].status, 'new');
+    assert.deepEqual(first.qzone.accounts['100'].writes, original.accounts['100'].writes);
+    assert.deepEqual(first.qzone.accounts['999'], original.accounts['999']);
+    assert.deepEqual(f.qzone, original);
+    assert.equal(reverse(first.qzone).appended, 0);
+    store.db.prepare('UPDATE events SET unread=0 WHERE source_id=?').run(key);
+    assert.equal(reverse(first.qzone).qzone.accounts['100'].comments[key].status, 'read');
+    const conflict = structuredClone(first.qzone);
+    conflict.accounts['100'].comments[key].content = 'changed';
+    assert.throws(() => reverse(conflict), { code: 'MIGRATION_CONFLICT' });
+  } finally { store.close(); }
+});
 
 test('delta overlap with legacy preview blocks whole batch instead of overriding read state or text', async t => {
   const f = await fixture(t); f.stage.importSnapshot(f.handle);
