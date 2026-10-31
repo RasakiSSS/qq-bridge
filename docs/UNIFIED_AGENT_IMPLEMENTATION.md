@@ -486,3 +486,19 @@ migration-reverse新增空间分区投影：分别合并动态/评论，自己�
 最近核验5小时剩余15%、周剩余17%，停止新开发并提交交接。切换路径审计发现deliverUnifiedQzone原先哈希sourceId，而迁移保留原键，会把同一动态再次入库。已改实时收件保留相同稳定键，真实桥接测试直接查询隔离账本核验；桥接与闭环22项通过（unified-source-key-tests.log）。补充激活源正文损坏、代次改变的失败用例，失败不写ready/cutover。此前带哈希的隔离开发账本不自动删除或升级；生产统一模式未启用，后续如复用这些旧实验库需显式对账。
 
 下一步收件切换的具体问题：目前cutover只记录统一账本，生产handleIncoming仍按启动时unifiedConfigured分支；journal仍active，importMigrationDeltas只接受staged。必须实现提交决定后、重启后和统一runtime暂不可用时仍先持久保存的新收件路由，并按稳定ID重放，不可简单在activate后清journal或直接调用易失败的runtime.ingest导致漏件。handleUnifiedIncoming缺时间时用Date.now、空间collect缺时间时用now，迁移路径不能照搬这些不稳定重试时间。仍须维护中拒绝旧写入、严格源归属和全入口覆盖。
+
+## 2026-10-31 切换后持久收件与好友申请投影
+
+从25b562b继续，备份codex/backup-unified-cutover-ingress-20261031。本轮环境变为只读沙箱，普通Git访问失败；已通过授权提权进行项目文件修改。生产实例没有重启或启用统一模式，用户人格/角色未改。
+
+migration-live-ingress.js新增ready/cutover后的日志重放：先append持久journal，再写统一目标；目标事务保存事件与来源回执，之后才推进journal进度。读取cutover的原转移水位，核验之后已交付前缀及目标事件指纹，防换库漏件。目标不可用和真实子进程在目标提交后退出均可恢复，重放不重复插入或改变已读。原journal保留，绝不回退旧投递；旧预览重叠仍阻断，需要可信原文对账。
+
+现有createMigrationBarrier可选replayPersisted接在持久append之后，仍登记在途工作；createUnifiedBridgeDriver可选replayPersisted在DSH ready判断前执行，DSH未就绪/人工暂停不阻止持久入库。已组合验证两者。生产bridge尚未配置这两个回调，不要误称所有真实收件入口都已完成迁移切换。
+
+新增migration-friend-request.js，复用已有好友申请归一化和账号核验，要求可信稳定时间及private来源。stage增量、激活核验和切换后重放均支持好友申请，只写既有私有friend_requests表，flag不进模型events。既有accepted/rejected/unknown状态保留，不重放任何关系动作，不改变聊天白名单。非法请求仍保留在journal并阻断游标，需处理后重放。
+
+实际bridge启动现在在acquireLock之后、loadState之前调用只读assertMigrationStartup：有staged/ready迁移状态时不能只关闭统一配置启动旧调度；ready需匹配cutover，损坏控制库拒绝启动。没有迁移的正常启动保持原逻辑。此屏障不是全宿主切换完成证明，也不解锁旧模式；未来完成受控回退需与此启动决策协调。
+
+测试：完整相关388项通过（unified-live-ingress-full-tests.log），随后启动屏障及真实桥接/闭环30项通过（unified-startup-fence-tests.log）。新测试覆盖目标离线、真实进程退出、目标回执丢失、身份改变、异步唤醒判断拒绝、每批重放限制、自己的动态与评论分离、合法好友申请跨切换保存及已处理状态不回退。
+
+下一步仍需实际宿主接线：持久日志的私有路径/安装归属注册，真实登录核验后挂接上述回调，所有收件/后台写入/控制台在维护中停稳，不能仅凭PID锁或当前登录推断旧文件归属。生产目前只接了启动只读屏障，未接维护入口或线上重放。完整原始QQ事件须在首个异步解析前持久化；重试时间不可用Date.now伪造。重叠原文恢复、多文件恢复和不可逆动作回传、超容量回退仍待完成。prefix每次重验成本随日志增长，后续性能优化不能跳过崩溃/换库核验。

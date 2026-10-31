@@ -150,9 +150,10 @@ export class MigrationIngress {
 // Event-loop adapter for a future bridge maintenance route. Every relevant
 // legacy writer/dispatch must pass runLegacy, every admitted inbound pass ingest.
 // It is intentionally NOT enabled in bridge.js until those call sites are audited.
-export function createMigrationBarrier({ journal, currentIdentity, assertLegacyIdle, flushLegacy, timeoutMs = 30000 }) {
+export function createMigrationBarrier({ journal, currentIdentity, assertLegacyIdle, flushLegacy, replayPersisted, timeoutMs = 30000 }) {
   if (![currentIdentity, assertLegacyIdle, flushLegacy].every(fn => typeof fn === 'function')) throw fail('MIGRATION_HOST_ADAPTER_REQUIRED');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw fail('MIGRATION_INVALID_TIMEOUT');
+  if (replayPersisted !== undefined && typeof replayPersisted !== 'function') throw fail('MIGRATION_HOST_ADAPTER_REQUIRED');
   const running = new Set();
   let acquiring = false;
   function track(operation) {
@@ -170,7 +171,12 @@ export function createMigrationBarrier({ journal, currentIdentity, assertLegacyI
       return track(operation);
     },
     ingest(event, legacyDelivery) {
-      if (journal.active()) return Promise.resolve(journal.append(currentIdentity(), event));
+      if (journal.active()) {
+        const receipt = journal.append(currentIdentity(), event);
+        // Persist before any target access. The optional host hook can select
+        // ready cutover on restart; failures never route the event to legacy.
+        return replayPersisted ? track(async () => ({ ...receipt, replay: await replayPersisted() })) : Promise.resolve(receipt);
+      }
       return track(() => legacyDelivery(event));
     },
     async acquire() {

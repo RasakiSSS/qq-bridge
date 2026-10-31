@@ -1,8 +1,10 @@
+import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { fail } from './store.js';
 
 // Bridge event-loop adapter. No model work until start/tick is explicitly called.
 // Ingest can open the durable inbox while DSH is offline or manually paused.
-export function createUnifiedBridgeDriver({ createHost, ready, log = () => {}, intervalMs = 1000 }) {
+export function createUnifiedBridgeDriver({ createHost, ready, replayPersisted, log = () => {}, intervalMs = 1000 }) {
   let host, opening, ticking, timer, closing = false, closePromise, restored = false, lastErrorAt = -Infinity;
   const report = () => {
     if (Date.now() - lastErrorAt >= 60000) { lastErrorAt = Date.now(); log('[unified] 统一运行暂不可用，消息保留；请检查本机状态，不会退回旧模型调度'); }
@@ -17,9 +19,11 @@ export function createUnifiedBridgeDriver({ createHost, ready, log = () => {}, i
     return opening;
   }
   function tick() {
-    if (closing || !ready()) return Promise.resolve({ status: 'paused' });
+    if (closing) return Promise.resolve({ status: 'paused' });
     if (ticking) return ticking;
     ticking = (async () => {
+      if (replayPersisted) await replayPersisted();
+      if (closing || !ready()) return { status: 'paused' };
       const current = await ensure();
       if (closing || !ready()) return { status: 'paused' };
       if (!restored) { await current.restore(); restored = true; }
@@ -73,4 +77,33 @@ export async function assertLegacySessionsIdle(api, ids) {
     if (projection?.kind !== 'sequenced' || !Array.isArray(inbox?.['next-step']) || !Array.isArray(inbox?.['next-turn'])) throw fail('LEGACY_PREFLIGHT_UNAVAILABLE');
     if (inbox['next-step'].length || inbox['next-turn'].length) throw fail('LEGACY_SESSION_BUSY');
   }
+}
+
+
+// Read-only startup fence, before the bridge loads/saves old state. Disabling
+// unified configuration is not a rollback transaction and cannot revive legacy.
+export function assertMigrationStartup(file, unifiedConfigured) {
+  if (!fs.existsSync(file)) return;
+  let db;
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+    db = new DatabaseSync(file, { readOnly: true });
+    if (db.prepare('PRAGMA application_id').get().application_id !== 0x51515541) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+    const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_imports'").get();
+    if (!table) return;
+    const batches = db.prepare('SELECT account,snapshot,phase FROM migration_imports').all();
+    for (const batch of batches) {
+      if (!['staged', 'ready'].includes(batch.phase)) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+      if (!unifiedConfigured) throw fail('MIGRATION_LEGACY_START_BLOCKED', '此安装已有迁移状态，不能通过关闭统一配置启动旧调度；请完成迁移或受控回退');
+      if (batch.phase === 'ready') {
+        const raw = db.prepare("SELECT payload FROM migration_preserved WHERE account=? AND category='cutover'").get(batch.account);
+        const decision = raw && JSON.parse(raw.payload);
+        if (!decision || decision.account !== batch.account || decision.snapshotId !== batch.snapshot || decision.route !== 'unified') throw fail('MIGRATION_STARTUP_UNVERIFIED');
+      }
+    }
+  } catch (error) {
+    if (error.code === 'MIGRATION_LEGACY_START_BLOCKED') throw error;
+    throw fail('MIGRATION_STARTUP_UNVERIFIED', '统一迁移状态不可验证，已阻止启动；原数据保持不动');
+  } finally { db?.close(); }
 }

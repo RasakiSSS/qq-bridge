@@ -39,7 +39,7 @@ import { UnifiedNativeGrants } from './unified/relationships.js';
 import { workspaceServer } from './unified/files.js';
 import { nativeFriendRequest } from './native-friend-client.js';
 import { startUnifiedHost } from './unified/host.js';
-import { createUnifiedBridgeDriver, assertLegacySessionsIdle } from './unified/bridge-driver.js';
+import { createUnifiedBridgeDriver, assertLegacySessionsIdle, assertMigrationStartup } from './unified/bridge-driver.js';
 import { createBridgeSendHandler } from './unified/bridge-send.js';
 import {
   loadSlang,
@@ -1420,6 +1420,7 @@ async function main() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
   acquireLock();
+  assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured);
   loadState();
 
   const sharedMemory = createSharedMemory({ file: path.join(STATE_DIR, 'memory.sqlite'), sanitize: redactSensitiveText });

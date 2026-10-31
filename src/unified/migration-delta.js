@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { accountId, sceneKey, fail, json } from './store.js';
+import { importMigrationFriendRequest, verifyMigrationFriendRequest } from './migration-friend-request.js';
 
 const hash = value => createHash('sha256').update(json(value)).digest('hex');
 
@@ -19,20 +20,27 @@ export function importMigrationDeltas({ store, stage, account, assertExclusive, 
     let imported = 0, duplicate = 0;
     for (const row of input.events) {
       sceneKey(row.scene);
-      if (!['message', 'qzone-feed', 'qzone-comment'].includes(row.kind)
+      if (!['message', 'qzone-feed', 'qzone-comment', 'friend-request'].includes(row.kind)
           || ((row.kind.startsWith('qzone-')) !== (row.scene === 'qzone'))
           || !Number.isSafeInteger(row.at) || row.at <= 0 || typeof row.source_id !== 'string'
           || !row.source_id || row.source_id.length > 512) throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');
       const payload = JSON.parse(row.payload);
       if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.originalUnavailable === true
-          || typeof payload.text !== 'string') throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');
+          || (row.kind !== 'friend-request' && typeof payload.text !== 'string')) throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');
       const fingerprint = hash([payload, row.at]);
       if (fingerprint !== row.fingerprint) throw fail('MIGRATION_CONFLICT');
       const category = `delta:${hash([row.scene, row.source_id, row.kind])}`;
       const receipt = store.db.prepare('SELECT payload FROM migration_preserved WHERE account=? AND category=?').get(account, category);
       if (receipt) {
         if (JSON.parse(receipt.payload).fingerprint !== fingerprint) throw fail('MIGRATION_CONFLICT');
+        if (row.kind === 'friend-request') verifyMigrationFriendRequest(store, account, row, JSON.parse(receipt.payload).requestId);
         duplicate++; continue;
+      }
+      if (row.kind === 'friend-request') {
+        const requestId = importMigrationFriendRequest(store, account, row);
+        store.db.prepare('INSERT INTO migration_preserved VALUES(?,?,?)').run(account, category, json({ fingerprint, requestId }));
+        if (checkpoint({ phase: 'friend-request', requestId })?.then) throw fail('ASYNC_TRANSACTION');
+        imported++; continue;
       }
       if (store.db.prepare('SELECT 1 FROM migration_sources WHERE account=? AND scene=? AND source_id=?').get(account, row.scene, row.source_id)
           || store.db.prepare('SELECT 1 FROM events WHERE account=? AND scene=? AND source_id=?').get(account, row.scene, row.source_id)) throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');

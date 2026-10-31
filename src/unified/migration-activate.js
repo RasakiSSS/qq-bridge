@@ -2,6 +2,7 @@ import { snapshotIdentity } from './migration-snapshot.js';
 import { importMigrationDeltas } from './migration-delta.js';
 import { fail } from './store.js';
 import { projectLegacyQzone } from './migration-qzone.js';
+import { migrationFriendRequest, verifyMigrationFriendRequest } from './migration-friend-request.js';
 const equivalent = (a, b) => JSON.stringify(a, sortKeys) === JSON.stringify(b, sortKeys);
 const sortKeys = (_, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item;
@@ -52,6 +53,10 @@ export function activateStagedMigration({ store, stage, journal, handle, lease, 
       }
     }
     for (const row of delta.events) {
+      if (row.kind === 'friend-request') {
+        verifyMigrationFriendRequest(store, account, row, migrationFriendRequest(account, row).id);
+        continue;
+      }
       const event = store.db.prepare('SELECT * FROM events WHERE account=? AND scene=? AND source_id=? AND kind=?').get(account, row.scene, row.source_id, row.kind);
       if (!event || event.at !== row.at || !equivalent(JSON.parse(event.payload), JSON.parse(row.payload))) throw fail('MIGRATION_CONFLICT');
     }
