@@ -164,6 +164,13 @@ export function snapshotJson(handle, name) {
   return bytes === null ? null : JSON.parse(bytes.toString('utf8'));
 }
 
+// Exact original bytes for the two paired rollback targets only.
+export function rollbackOriginalBytes(handle, name) {
+  const data = verified.get(handle);
+  if (!data || !['social-v2.json','qzone.json'].includes(name)) throw fail('MIGRATION_SNAPSHOT_UNVERIFIED');
+  return data.files[name] === null ? null : Buffer.from(data.files[name]);
+}
+
 // Host-only attestation metadata, without config, tokens or file contents.
 export function snapshotIdentity(handle) {
   const data = verified.get(handle);
