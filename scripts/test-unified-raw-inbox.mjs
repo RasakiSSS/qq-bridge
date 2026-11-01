@@ -52,5 +52,7 @@ test('maintenance receiver stores pre-login messages provisionally and only rele
   const {readCaptureStatus}=await import('../src/unified/capture-status.js');
   const report=readCaptureStatus(opts.file,'100');
   assert.equal(report.windows,2); assert.equal(report.failedWindows,1); assert.equal(report.intervalsBetweenConnections,1);
+  assert.equal(report.recentUnverifiedIntervals.length,1);
+  assert.ok(Number.isSafeInteger(report.recentUnverifiedIntervals[0].durationMs));
   assert.equal(report.counts.unverified,1); assert.equal(report.counts.done,2); assert.equal(report.historyCoverage,'unverified');
 });

@@ -1,7 +1,8 @@
 import {DatabaseSync} from 'node:sqlite';
+import {assertMigrationStartup} from '../src/unified/bridge-driver.js';
 import {UnifiedStore} from '../src/unified/store.js';
 import {MigrationStage} from '../src/unified/migration-stage.js';
-import {activateStagedMigration} from '../src/unified/migration-activate.js';
+
 import {persistUnifiedIngress} from '../src/unified/migration-live-ingress.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,7 +34,7 @@ test('maintenance restart reopens the same bound snapshot and paused candidate w
       assert.equal(candidate.phase,'staged');assert.equal(reg.journal.assertReady(reg.identity).transferred,0);
       if(previous) {
         assert.equal(snap.directory,previous.directory);assert.equal(snap.resumed,true);
-        const {installPausedCandidate}=await import('../src/unified/migration-install.js');
+        const {installPausedCandidate,activateInstalledCandidate}=await import('../src/unified/migration-install.js');
         const target=path.join(root,'state/unified.sqlite');
         const install={...opts,handle:snap.handle,candidate,current:reg.identity,journal:reg.journal,assertExclusive:()=>true};
         fs.writeFileSync(target,'existing file');
@@ -52,22 +53,34 @@ test('maintenance restart reopens the same bound snapshot and paused candidate w
         assert.equal((await installPausedCandidate(install)).operational,false);
         assert.equal(fs.statSync(target).nlink,1);
         assert.equal((await installPausedCandidate(install)).phase,'staged');
-        const store=new UnifiedStore(target);
+        let store;
         const stage=new MigrationStage({file:path.join(candidate.directory,'stage.sqlite'),verifyPrivate:opts.verifyPrivate});
         try {
           const current=reg.identity, journal=reg.journal;
           const lease={assert:()=>({...current,quiesced:true})};
-          const activate=()=>activateStagedMigration({journal,store,stage,handle:snap.handle,lease});
+          const params={...install,stage,lease,assertCoverage:()=>true};
+          const activate=(overrides)=>activateInstalledCandidate({...params,...overrides});
           const message=id=>({account,scene:'group:1',sourceId:id,kind:'message',at:1000,payload:{text:id,media:[]}});
           journal.append(current,message('before-cutover'));
           assert.throws(activate,{code:'MIGRATION_INGRESS_PENDING'});
           journal.transfer(current,stage);
-          assert.equal(activate().paused,true);
+          assert.throws(()=>activate({assertCoverage:()=>false}),{code:'MIGRATION_COVERAGE_UNVERIFIED'});
+          for(const point of ['intent','target-committed']){
+            assert.throws(()=>activate({checkpoint:p=>{if(p===point)throw Error('crash at '+p);}}),new RegExp('crash at '+point));
+          }
+          const startup=()=>assertMigrationStartup(target,true,path.join(root,'state/migration-ingress.sqlite'));
+          assert.throws(startup,{code:'MIGRATION_STARTUP_UNVERIFIED'});
+          assert.equal(activate().ingressThrough,1);
+          assert.equal(startup(),true);
+          assert.throws(()=>assertMigrationStartup(target,true,path.join(root,'missing.sqlite')),{code:'MIGRATION_STARTUP_UNVERIFIED'});
+          assert.deepEqual(activate(),activate());
+          store=new UnifiedStore(target);
+          assert.equal(store.account(account).paused,1);
           const live={journal,store,current,wakeAllowed:()=>true};
           persistUnifiedIngress(live,message('after-cutover'));
           assert.equal(persistUnifiedIngress(live,message('after-cutover')).receipt.duplicate,true);
           assert.deepEqual(store.db.prepare('SELECT source_id FROM events WHERE unread=1 ORDER BY seq').all().map(r=>r.source_id),['before-cutover','after-cutover']);
-        } finally {stage.close();store.close();}
+        } finally {stage.close();store?.close();}
         write('config.json',{externalChange:true});
         await assert.rejects(captureBoundMigration(args),{code:'MIGRATION_SOURCE_CHANGED'});
       }

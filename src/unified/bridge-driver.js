@@ -120,6 +120,7 @@ export function assertMigrationStartup(file, unifiedConfigured, journalFile) {
       return;
     }
     const batches = db.prepare('SELECT account,snapshot,phase FROM migration_imports').all();
+    if (journalFile && batches.length && !retained) throw fail('MIGRATION_STARTUP_UNVERIFIED');
     if (retained && !batches.length) throw fail('MIGRATION_STARTUP_UNVERIFIED');
     for (const batch of batches) {
       if (!['staged', 'ready'].includes(batch.phase)) throw fail('MIGRATION_STARTUP_UNVERIFIED');
@@ -128,6 +129,21 @@ export function assertMigrationStartup(file, unifiedConfigured, journalFile) {
         const raw = db.prepare("SELECT payload FROM migration_preserved WHERE account=? AND category='cutover'").get(batch.account);
         const decision = raw && JSON.parse(raw.payload);
         if (!decision || decision.account !== batch.account || decision.snapshotId !== batch.snapshot || decision.route !== 'unified') throw fail('MIGRATION_STARTUP_UNVERIFIED');
+        if (retained) {
+          if (!retained.isFile() || retained.isSymbolicLink() || retained.nlink !== 1) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+          const log = new DatabaseSync(journalFile, { readOnly: true });
+          try {
+            if (log.prepare("SELECT 1 FROM sqlite_schema WHERE name='installed_base' AND type='table'").get()) {
+              const installed = log.prepare('SELECT * FROM installed_base WHERE id=1').get();
+              const intent = log.prepare('SELECT * FROM activation_intent WHERE id=1').get();
+              const disk = fs.lstatSync(file, { bigint: true });
+              if (installed?.phase !== 'published' || installed.snapshot !== batch.snapshot ||
+                  installed.file_id !== disk.dev + ':' + disk.ino || intent?.committed !== 1 ||
+                  intent.file_id !== installed.file_id || intent.snapshot !== batch.snapshot ||
+                  intent.at !== decision.at || intent.through_seq !== decision.ingressThrough) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+            }
+          } finally { log.close(); }
+        }
       }
     }
     return batches.length > 0;

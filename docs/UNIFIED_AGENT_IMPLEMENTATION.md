@@ -549,3 +549,6 @@ raw 库服务统一模式正常运行，不是带来源证明的迁移 journal�
 The isolated maintenance rehearsal now opens the published ledger, catches a pre-cutover arrival, refuses activation until transfer, and accepts a new live arrival exactly once. The imported manual pause survives. Activation checks the authenticated original space snapshot for unresolved writes before importing deltas. Only sent and explicitly not-sent outcomes are settled. Full related suite passed 410 tests. No production cutover was performed.
 
 Next connect the installed publication receipt to activation with durable crash recovery. Check physical identity before opening the target and validate the cutover receipt on resume. A live authenticated connection alone cannot attest to coverage during disconnection.
+
+### 安装后切换的中断恢复
+activateInstalledCandidate 在独占租约内检查正式目标的文件身份、已发布摘要和快照归属，在开账本前先持久记录切换意图。重入时校验同一文件和切换决定；若目标已提交，只补收件日志的确认。启动端核验安装凭证、时间、边界与日志确认，阻止半提交启动。完整隔离组合 410 项通过（activation-intent-full.log）。收件报告列出最近 30 次连接间未经验证的区间，缺失结束时间保持未知。尚需可信上游覆盖证明和正式维护接线；不得把 assertCoverage 固定为真。测试中的临时安装已覆盖中断续作，尚无生产切换。

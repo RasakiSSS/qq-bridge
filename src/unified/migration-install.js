@@ -3,6 +3,7 @@ import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {DatabaseSync,backup} from 'node:sqlite';
 import {snapshotIdentity} from './migration-snapshot.js';
+import {activateStagedMigration} from './migration-activate.js';
 import {MigrationStage} from './migration-stage.js';
 import {importStagedMigration} from './migration-import.js';
 import {UnifiedStore,fail} from './store.js';
@@ -104,4 +105,65 @@ export async function installPausedCandidate({root,handle,candidate,current,jour
   if(identity(safeFile(target))!==receipt.file_id)throw fail('MIGRATION_CONFLICT');
   journal.transaction(()=>journal.db.prepare("UPDATE installed_base SET phase='published' WHERE id=1").run());
   return {phase:'staged',snapshotId:handle.snapshotId,operational:false};
+}
+
+// Called under the same exclusive host lease as capture/transfer. The caller
+// must establish transport coverage before creating the first durable intent.
+export function activateInstalledCandidate({root,handle,journal,stage,lease,verifyPrivate,assertCoverage,checkpoint=()=>{}}) {
+  const source=snapshotIdentity(handle), account=source.account;
+  const state=path.join(root,'state'), target=path.join(state,'unified.sqlite');
+  if(!path.isAbsolute(root)||path.relative(state,fs.realpathSync(state))||!verifyPrivate(state))
+    throw fail('MIGRATION_PRIVATE_DIRECTORY_REQUIRED');
+  const receipt=journal.db.prepare('SELECT * FROM installed_base WHERE id=1').get();
+  if(receipt?.snapshot!==handle.snapshotId||receipt.phase!=='published') throw fail('MIGRATION_PENDING');
+  const check=()=>{
+    const current=lease.assert();
+    if(current?.quiesced!==true||current.account!==account||current.sourceAccount!==account||
+      current.provenance!==source.provenance||current.epoch!==source.epoch) throw fail('MIGRATION_NOT_QUIESCED');
+    if(identity(safeFile(target))!==receipt.file_id||!verifyPrivate(target))throw fail('MIGRATION_SOURCE_CHANGED');
+    const barrier=journal.assertReady(current);
+    if(barrier.snapshot!==handle.snapshotId)throw fail('MIGRATION_DIFFERENT_SNAPSHOT');
+    return barrier;
+  };
+  const barrier=check();
+  journal.db.exec('CREATE TABLE IF NOT EXISTS activation_intent(id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL, file_id TEXT NOT NULL, at INTEGER NOT NULL, through_seq INTEGER NOT NULL, committed INTEGER NOT NULL)');
+  let intent=journal.db.prepare('SELECT * FROM activation_intent WHERE id=1').get();
+  for(const suffix of ['-wal','-shm','-journal']){
+    const file=target+suffix;
+    if(fs.lstatSync(file,{throwIfNoEntry:false})){
+      safeFile(file);
+      if(!intent||!verifyPrivate(file))throw fail('MIGRATION_CONFLICT');
+    }
+  }
+  if(!intent){
+    if(fileHash(target)!==receipt.digest)throw fail('MIGRATION_CONFLICT');
+    if(journal.db.prepare('SELECT 1 FROM incoming WHERE seq>?').get(barrier.transferred))throw fail('MIGRATION_INGRESS_PENDING');
+    if(assertCoverage?.()!==true)throw fail('MIGRATION_COVERAGE_UNVERIFIED');
+    journal.transaction(()=>{
+      check();
+      journal.db.prepare('INSERT INTO activation_intent VALUES(1,?,?,?,?,0)').run(handle.snapshotId,receipt.file_id,Date.now(),barrier.transferred);
+    });
+    checkpoint('intent');
+    intent=journal.db.prepare('SELECT * FROM activation_intent WHERE id=1').get();
+  }
+  if(intent.snapshot!==handle.snapshotId||intent.file_id!==receipt.file_id)throw fail('MIGRATION_CONFLICT');
+  const store=new UnifiedStore(target);
+  try {
+    const phase=store.db.prepare('SELECT phase FROM migration_imports WHERE account=? AND snapshot=?').get(account,handle.snapshotId)?.phase;
+    if(phase==='staged'&&!intent.committed){
+      if(assertCoverage?.()!==true)throw fail('MIGRATION_COVERAGE_UNVERIFIED');
+      // New arrivals after a pre-commit crash must be transferred first.
+      const through=check().transferred;
+      journal.transaction(()=>journal.db.prepare('UPDATE activation_intent SET through_seq=? WHERE id=1').run(through));
+      intent.through_seq=through;
+      activateStagedMigration({store,stage,journal,handle,lease,now:intent.at});
+      checkpoint('target-committed');
+    } else if(phase!=='ready')throw fail('MIGRATION_CONFLICT');
+    const decision=JSON.parse(store.db.prepare("SELECT payload FROM migration_preserved WHERE account=? AND category='cutover'").get(account)?.payload??'null');
+    if(decision?.snapshotId!==intent.snapshot||decision.account!==account||decision.epoch!==source.epoch||
+      decision.provenance!==source.provenance||decision.route!=='unified'||decision.at!==intent.at||
+      decision.ingressThrough!==intent.through_seq||check().transferred<intent.through_seq)throw fail('MIGRATION_CONFLICT');
+    journal.transaction(()=>journal.db.prepare('UPDATE activation_intent SET committed=1 WHERE id=1').run());
+    return decision;
+  } finally {store.close();}
 }

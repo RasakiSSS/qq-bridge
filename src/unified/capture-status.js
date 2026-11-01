@@ -22,7 +22,14 @@ export function readCaptureStatus(file,account) {
     }
     const has=db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='capture_windows'").get();
     const windows=has?db.prepare('SELECT opened,verified,failed,closed FROM capture_windows WHERE account=? ORDER BY rowid').all(account):[];
-    return {exists:true,counts,windows:windows.length,failedWindows:windows.filter(w=>w.failed!==null).length,
+    // A crash can leave the previous end unknown. Never use the next open
+    // time as evidence of continuous receipt, even if both timestamps match.
+    const intervals=windows.slice(1).map((next,i)=>{
+      const previous=windows[i];
+      const start=previous.failed===null ? previous.closed : previous.failed;
+      return {from:start,to:next.opened,durationMs:start!==null&&next.opened>=start?next.opened-start:null};
+    });
+    return {exists:true,counts,recentUnverifiedIntervals:intervals.slice(-30),windows:windows.length,failedWindows:windows.filter(w=>w.failed!==null).length,
       unknownPriorEnds:windows.slice(0,-1).filter(w=>w.closed===null).length,intervalsBetweenConnections:Math.max(0,windows.length-1),
       lastWindow:windows.at(-1)??null,historyCoverage:'unverified'};
   } finally {db.close();}
