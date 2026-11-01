@@ -168,6 +168,26 @@ export function snapshotJson(handle, name) {
   return bytes === null ? null : JSON.parse(bytes.toString('utf8'));
 }
 
+// Reopening an already bound snapshot must compare the entire installation,
+// not only the two files named in the operator's account declaration.
+export async function assertSnapshotStillCurrent({handle,files,memoryFile,privateRoot,verifyPrivate}) {
+  const data=verified.get(handle);
+  if (!data || JSON.stringify(index(fileSet(files)))!==JSON.stringify(data.manifest.files)) throw fail('MIGRATION_SOURCE_CHANGED');
+  if (!memoryFile && !data.manifest.memory) return;
+  if (!memoryFile || !data.manifest.memory) throw fail('MIGRATION_SOURCE_CHANGED');
+  plainDirectory(privateRoot); requirePrivate(verifyPrivate,privateRoot);
+  plainDirectory(path.dirname(memoryFile)); regular(memoryFile);
+  const temp=path.join(privateRoot,'verify-memory-'+randomUUID()+'.sqlite');
+  fs.closeSync(fs.openSync(temp,'wx',0o600));
+  try {
+    requirePrivate(verifyPrivate,temp);
+    const db=new DatabaseSync(memoryFile,{readOnly:true});
+    try {await backup(db,temp);} finally {db.close();}
+    const actual=fileDigest(temp);
+    if(actual.bytes!==data.manifest.memory.bytes || actual.sha256!==data.manifest.memory.sha256) throw fail('MIGRATION_SOURCE_CHANGED');
+  } finally {fs.unlinkSync(temp);}
+}
+
 // Exact original bytes for the two paired rollback targets only.
 export function rollbackOriginalBytes(handle, name) {
   const data = verified.get(handle);

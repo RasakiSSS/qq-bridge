@@ -49,4 +49,8 @@ test('maintenance receiver stores pre-login messages provisionally and only rele
   await recv.close();
   const next = createRawInbox(opts); await next.drain(account);
   assert.deepEqual(deliveries,[2,3]); assert.ok(statuses.includes('unverified')); await next.close();
+  const {readCaptureStatus}=await import('../src/unified/capture-status.js');
+  const report=readCaptureStatus(opts.file,'100');
+  assert.equal(report.windows,2); assert.equal(report.failedWindows,1); assert.equal(report.intervalsBetweenConnections,1);
+  assert.equal(report.counts.unverified,1); assert.equal(report.counts.done,2); assert.equal(report.historyCoverage,'unverified');
 });

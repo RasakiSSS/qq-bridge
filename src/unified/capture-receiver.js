@@ -22,17 +22,22 @@ export function captureAccount({ file, expected, verifyPrivate, excluded }) {
 
 export async function startCaptureReceiver({ account, bot, inbox, allowed, relationships, status }) {
   let epoch = 0, online = false, closed = false, healthy = true, hold;
+  function observe(state) {
+    if (!hold) return;
+    try { inbox.observeCapture(account,hold,state); }
+    catch { healthy=false; status('capture-failed'); }
+  }
   const invalid = () => { online = false; hold = undefined; epoch++; };
   bot.on('open', () => {
-    invalid();
-    const seen = epoch; hold = 'login:' + randomUUID();
+    observe('closed'); invalid();
+    const seen = epoch; hold = 'login:' + randomUUID(); observe('opened');
     void Promise.resolve().then(() => bot.getLoginInfo()).then(info => {
       if (seen !== epoch || closed) return;
       if (String(info?.user_id) !== account) throw fail('MIGRATION_ACCOUNT_UNVERIFIED');
-      inbox.confirmLogin(account, hold); online = true; status('ready');
-    }).catch(() => { if (seen === epoch && !closed) status('unverified'); });
+      inbox.confirmLogin(account, hold); online = true; observe('verified'); status('ready');
+    }).catch(() => { if (seen === epoch && !closed) { observe('unverified'); status('unverified'); } });
   });
-  bot.on('close', () => { invalid(); if (!closed) status('disconnected'); });
+  bot.on('close', () => { observe('closed'); invalid(); if (!closed) status('disconnected'); });
   bot.on('error', () => { if (!closed) status('connection-error'); });
   function capture(kind, event) {
     if (closed || !hold || String(event?.self_id) !== account) return;
@@ -43,11 +48,11 @@ export async function startCaptureReceiver({ account, bot, inbox, allowed, relat
       if (String(event.user_id) === account || String(event.sender?.user_id) === account) return;
       const peer = kind === 'private' ? event.user_id : event.group_id;
       if (allowed(kind, peer)) inbox.capture(kind + ':' + peer, event, online ? undefined : hold);
-    } catch { healthy = false; status('capture-failed'); }
+    } catch { healthy = false; observe('failed'); status('capture-failed'); }
   }
   bot.onPrivateMessage(e => capture('private',e));
   bot.onGroupMessage(e => capture('group',e));
   bot.onRequest('friend', e => capture('friend',e));
   try { await bot.connect(); } catch { closed = true; bot.close(); throw fail('MIGRATION_RECEIVER_OFFLINE'); }
-  return { get generation() { return online ? hold : null; }, get healthy() { return healthy; }, get verified() { return online && !closed; }, close() { closed = true; invalid(); bot.close(); return inbox.close(); } };
+  return { get generation() { return online ? hold : null; }, get healthy() { return healthy; }, get verified() { return online && !closed; }, close() { closed = true; observe('closed'); invalid(); bot.close(); return inbox.close(); } };
 }

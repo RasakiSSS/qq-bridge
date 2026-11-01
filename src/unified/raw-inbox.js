@@ -112,6 +112,19 @@ export function createRawInbox({ file, assertAccess, verifyPrivate, hardenFile, 
     return draining;
   }
   return { capture, captureFriend, drain,
+    observeCapture(account, hold, state, at=Date.now()) {
+      accountId(account);
+      if (!/^login:[a-f0-9-]{36}$/.test(hold) || !['opened','verified','unverified','failed','closed'].includes(state)
+          || !Number.isSafeInteger(at) || at<=0) throw fail('INVALID_RAW_EVENT');
+      dbCall(db=>{
+        db.exec('CREATE TABLE IF NOT EXISTS capture_windows(account TEXT NOT NULL,generation TEXT PRIMARY KEY,opened INTEGER NOT NULL,verified INTEGER,failed INTEGER,closed INTEGER)');
+        if (state==='opened') db.prepare('INSERT INTO capture_windows(account,generation,opened) VALUES(?,?,?)').run(account,hold,at);
+        else {
+          const column=state==='unverified'?'failed':state;
+          if(db.prepare('UPDATE capture_windows SET '+column+'=COALESCE('+column+',?) WHERE account=? AND generation=?').run(at,account,hold).changes!==1) throw fail('INVALID_RAW_EVENT');
+        }
+      });
+    },
     confirmLogin(account, hold) {
       if (!/^login:[a-f0-9-]{36}$/.test(hold)) throw fail('INVALID_RAW_EVENT');
       if (fs.existsSync(file)) dbCall(db => db.prepare("UPDATE raw SET status='pending' WHERE account=? AND status=?").run(account, hold));

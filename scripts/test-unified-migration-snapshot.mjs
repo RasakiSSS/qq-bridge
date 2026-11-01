@@ -93,3 +93,18 @@ test('fixed source reader preserves roles and presets, records absence and rejec
   fs.linkSync(path.join(f.root, 'config.json'), path.join(f.root, 'linked-config.json'));
   assert.throws(() => readLegacySnapshotFiles(f.root), { code: 'MIGRATION_UNSAFE_FILE' });
 });
+
+test('bound snapshot restart compares all legacy sources and SQLite contents before candidate reuse', async t=>{
+  const {assertSnapshotStillCurrent}=await import('../src/unified/migration-snapshot.js');
+  const f=fixture(t), memoryFile=path.join(f.root,'live-memory.sqlite');
+  const db=new DatabaseSync(memoryFile);
+  try{
+    db.exec("PRAGMA journal_mode=WAL; CREATE TABLE memory(id INTEGER PRIMARY KEY, note TEXT); INSERT INTO memory(note) VALUES('before')");
+    const captured=await captureMigrationSnapshot({...f.options,memoryFile}),handle=f.load(captured);
+    const opts={handle,files:f.files,memoryFile,privateRoot:f.root,verifyPrivate:()=>true};
+    await assertSnapshotStillCurrent(opts);
+    await assert.rejects(assertSnapshotStillCurrent({...opts,files:{...f.files,'config.json':Buffer.from('{}')}}),{code:'MIGRATION_SOURCE_CHANGED'});
+    db.exec("UPDATE memory SET note='after'");
+    await assert.rejects(assertSnapshotStillCurrent(opts),{code:'MIGRATION_SOURCE_CHANGED'});
+  }finally{db.close();}
+});

@@ -1,3 +1,5 @@
+import { holdMigrationPort } from './unified/maintenance-port.js';
+import { installPausedCandidate } from './unified/migration-install.js';
 import { prepareMigrationCandidate } from './unified/migration-candidate.js';
 import { prepareCaptureJournal, captureBoundMigration } from './unified/migration-maintenance.js';
 import { verifyMaintenanceAcl } from './unified/maintenance-acl.js';
@@ -91,7 +93,7 @@ const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 const RELATIONSHIPS_FILE = path.join(STATE_DIR, 'relationships.json');
 let closeUnifiedOnShutdown = null;
-const captureArg = process.argv?.slice(2).find(arg => /^--migration-(receive|snapshot)-only/.test(arg));
+const captureArg = process.argv?.slice(2).find(arg => /^--migration-(?:(receive|snapshot)-only|install-staged)/.test(arg));
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1420,11 +1422,14 @@ let stateDirHardened = null;
 async function main() {
   const cfg = loadConfig();
   if (captureArg !== undefined) {
-    const expected = /^--migration-(?:receive|snapshot)-only=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
-    const snapshotOnly = captureArg.startsWith('--migration-snapshot-only=');
+    const expected = /^--migration-(?:(?:receive|snapshot)-only|install-staged)=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
+    const installStaged = captureArg.startsWith('--migration-install-staged=');
+    const snapshotOnly = installStaged || captureArg.startsWith('--migration-snapshot-only=');
+    if (installStaged && cfg.socialV2?.unified?.enabled===true) throw new Error('暂存安装时必须保持统一调度关闭');
     if (!expected || readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode !== 'reserved2') throw new Error('维护收件须指定账号和已有二代模式');
-    acquireLock({ strict: true });
-    const assertOwner = () => { if (Number(fs.readFileSync(LOCK_FILE, 'utf8')) !== process.pid) throw new Error('维护收件失去安装锁'); };
+    const portLease=await holdMigrationPort(Number(cfg.consolePort)||3100);
+    try { acquireLock({ strict: true }); } catch(error) { await portLease.close(); throw error; }
+    const assertOwner = () => { portLease.assert(); if (Number(fs.readFileSync(LOCK_FILE, 'utf8')) !== process.pid) throw new Error('维护收件失去安装锁'); };
     const conn = await discoverSnowLumaConnection({ cfg });
     if (!conn.ok || String(conn.self?.user_id) !== expected) throw new Error('维护收件未验证到目标网关账号');
     const privateCheck = target => verifyMaintenanceAcl(target) && unifiedBindingExcluded(target);
@@ -1459,16 +1464,20 @@ async function main() {
         const generation=receiver.generation;
         const candidate=prepareMigrationCandidate({parent:privateRoot,handle:result.handle,account,current:registration.identity,verifyPrivate:privateCheck,
           assertExclusive:()=>{assertOwner();return receiver.verified && receiver.healthy && receiver.generation===generation;}});
+        const installed=installStaged ? await installPausedCandidate({root:ROOT,handle:result.handle,candidate,current:registration.identity,
+          journal:registration.journal,verifyPrivate:privateCheck,hardenFile,
+          assertExclusive:()=>{assertOwner();return receiver.verified && receiver.healthy && receiver.generation===generation;}}) : null;
         log('[migration] 已生成并核验私有快照及隔离候选账本：' + path.basename(result.directory) + '；保持只收件');
-        return {snapshotId:result.snapshotId,directory:result.directory,candidate};
+        return {snapshotId:result.snapshotId,directory:result.directory,candidate,installed};
       })();
       void snapshot.catch(()=>log('[migration] 快照未通过验收；保持只收件，未启动统一模式'));
     }
     closeUnifiedOnShutdown = async () => {
-      await receiver.close(); if (snapshot) await snapshot.catch(()=>{}); registration?.journal.close();
+      try {await receiver.close(); if (snapshot) await snapshot.catch(()=>{}); registration?.journal.close();}
+      finally {await portLease.close();}
     };
     if (snapshot) return { receiver, snapshot, close:closeUnifiedOnShutdown };
-    return receiver;
+    return {get verified(){return receiver.verified;},close:closeUnifiedOnShutdown};
   }
   // Startup-only opt-in: changing the JSON does not hot-switch between owners.
   const unifiedConfigured = cfg.socialV2?.unified?.enabled === true;

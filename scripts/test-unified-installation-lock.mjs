@@ -16,3 +16,14 @@ test('strict unified installation claim never steals live, empty, malformed or s
     }
   } finally { fs.writeFileSync(file, original); await h.close(); }
 });
+
+test('maintenance holds the same exclusive loopback port probed by legacy startup', async()=>{
+  const {holdMigrationPort}=await import('../src/unified/maintenance-port.js');
+  const net=await import('node:net');
+  const probe=net.createServer(); await new Promise((ok,no)=>{probe.once('error',no);probe.listen(0,'127.0.0.1',ok);});
+  const port=probe.address().port;await new Promise(r=>probe.close(r));
+  const held=await holdMigrationPort(port);
+  try{held.assert();await assert.rejects(holdMigrationPort(port),{code:'MIGRATION_INSTALLATION_LOCKED'});}finally{await held.close();}
+  assert.throws(()=>held.assert(),{code:'MIGRATION_EXCLUSIVE_REQUIRED'});
+  const next=await holdMigrationPort(port);await next.close();
+});

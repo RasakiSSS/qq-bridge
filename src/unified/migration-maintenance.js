@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { accountId, fail } from './store.js';
 import { randomUUID } from 'node:crypto';
 import { MigrationIngress } from './migration-ingress.js';
-import { snapshotIdentity, captureMigrationSnapshot, readLegacySnapshotFiles, loadMigrationSnapshot } from './migration-snapshot.js';
+import { assertSnapshotStillCurrent, snapshotIdentity, captureMigrationSnapshot, readLegacySnapshotFiles, loadMigrationSnapshot } from './migration-snapshot.js';
 
 const scope = ['state/social-v2.json','state/sessions.json'];
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -81,6 +81,26 @@ export async function captureBoundMigration({ root, privateRoot, account, journa
   const idle = async () => { check(); if (await assertIdle() !== true) throw fail('LEGACY_SESSION_BUSY'); check(); };
   await idle();
   const memory = path.join(root,'state/memory.sqlite');
+  const bound=journal.assertReady(identity).snapshot;
+  if (bound) {
+    if (!/^[a-f0-9]{64}$/.test(bound) || !verifyPrivate(privateRoot)) throw fail('MIGRATION_SNAPSHOT_UNVERIFIED');
+    const matches=[];
+    for (const entry of fs.readdirSync(privateRoot,{withFileTypes:true})) {
+      if (!entry.isDirectory() || !/^snapshot-[a-f0-9-]{36}$/.test(entry.name)) continue;
+      const dir=path.join(privateRoot,entry.name), marker=path.join(dir,'manifest.json');
+      if (!fs.existsSync(marker)) continue;
+      if (!verifyPrivate(dir) || !verifyPrivate(marker)) throw fail('MIGRATION_PRIVATE_DIRECTORY_REQUIRED');
+      if (JSON.parse(regular(marker,1024*1024)).snapshotId===bound) matches.push(dir);
+    }
+    if (matches.length!==1) throw fail('MIGRATION_SNAPSHOT_UNVERIFIED');
+    const directory=matches[0];
+    const handle=loadMigrationSnapshot({directory,expectedAccount:account,verifyPrivate,
+      attest:info=>info.snapshotId===bound && info.epoch===identity.epoch && info.account===account});
+    if (snapshotIdentity(handle).provenance!==proof.provenance) throw fail('MIGRATION_SOURCE_CHANGED');
+    await assertSnapshotStillCurrent({handle,files:readLegacySnapshotFiles(root),memoryFile:fs.existsSync(memory)?memory:null,privateRoot,verifyPrivate});
+    await idle(); check();
+    return {directory,handle,snapshotId:bound,account,resumed:true};
+  }
   const result = await captureMigrationSnapshot({root:privateRoot, verifyPrivate, memoryFile:fs.existsSync(memory)?memory:null,
     acquire:async()=>({assert:()=>{check();return {...identity,quiesced:true};},release(){}}),
     readFiles:async()=>{await idle();const files=readLegacySnapshotFiles(root);proof.assertFiles(files);return files;}});
