@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+import { truncateText, truncateTextTail } from '../md-to-plain.js';
 import { createHash } from 'node:crypto';
 import { fail } from './store.js';
 import { importMigrationFriendRequest, verifyMigrationFriendRequest } from './migration-friend-request.js';
@@ -56,10 +58,28 @@ export function replayUnifiedIngress({ journal, store, current, wakeAllowed, lim
       const payload = JSON.parse(row.payload);
       if (!['message', 'qzone-feed', 'qzone-comment'].includes(row.kind) || typeof payload.text !== 'string'
         || payload.originalUnavailable === true || fingerprint(payload, row.at) !== row.fingerprint) throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');
-      // Overlap with a pre-cutover preview requires source recovery, not a guess.
-      const previous = store.db.prepare('SELECT 1 FROM events WHERE account=? AND scene=? AND source_id=? AND kind=?')
+      const mapped = store.db.prepare('SELECT * FROM migration_sources WHERE account=? AND scene=? AND source_id=?').get(current.account, row.scene, row.source_id);
+      const previous = store.db.prepare('SELECT * FROM events WHERE account=? AND scene=? AND source_id=? AND kind=?')
         .get(current.account, row.scene, row.source_id, row.kind);
-      if (previous) throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');
+      if (mapped || previous) {
+        const old = mapped && JSON.parse(mapped.payload);
+        // The old bridge stored arrival milliseconds; OneBot supplies send
+        // seconds. Accept only the same second and the exact old head AND tail.
+        if (row.kind !== 'message' || !previous || !old || mapped.legacy_seq <= 0 || mapped.event_seq !== previous.seq
+          || !isDeepStrictEqual(JSON.parse(previous.payload), old) || old.originalUnavailable !== true
+          || !['read','unread'].includes(mapped.read_state) || payload.gatewayPlainText !== true
+          || old.messageId !== row.source_id || payload.messageId !== row.source_id || !old.senderQQ || old.senderQQ !== payload.senderQQ
+          || old.isSelf || payload.senderQQ === current.account || previous.at !== old.at || Math.floor(old.at / 1000) * 1000 !== row.at
+          || old.quoteTargetIsSelf || old.forwardIds?.length || old.media?.length || payload.media?.length
+          || old.text !== truncateText(payload.text,200) || old.tail !== truncateTextTail(payload.text,200)
+          || (old.plain && old.plain !== old.text)) throw fail('MIGRATION_DELTA_REQUIRES_RECONCILIATION');
+        // Keep the exact event seq/unread/wake and all previously issued
+        // receipts. The private source map retains the old arrival and preview.
+        store.db.prepare('UPDATE events SET payload=?,at=? WHERE seq=?').run(row.payload,row.at,previous.seq);
+        store.db.prepare('INSERT INTO migration_preserved VALUES(?,?,?)')
+          .run(current.account, receiptKey(row), JSON.stringify({ eventSeq: previous.seq, fingerprint: row.fingerprint }));
+        check(); return true;
+      }
       const wake = wakeAllowed({ ...row, payload });
       if (typeof wake !== 'boolean') throw fail('MIGRATION_INVALID_WAKE');
       const self = row.kind === 'message' ? payload.isSelf === true : row.kind === 'qzone-feed' && payload.authorQQ === current.account;

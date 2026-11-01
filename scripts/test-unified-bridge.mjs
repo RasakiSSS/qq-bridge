@@ -10,11 +10,11 @@ import { createUnifiedBridgeDriver, assertLegacySessionsIdle } from '../src/unif
 import { invokeMainTool } from '../plugins/qq-agent-presets/qq-unified-client.mjs';
 
 const ok = value => ({ result: { ok: true, value } });
-async function fixture(t, options = {}, globals = {}) {
+async function fixture(t, options = {}, globals = {}, files = {}) {
   let sid;
   const sessionPresets = new Map();
   const h = await bridgeHarness({ config: { socialV2: { unified: { enabled: true, workspaceId: 'fixture-workspace' }, sharedMemory: { enabled: false }, ...options } },
-    files: { 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml': '[]' },
+    files: { 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml': '[]', ...files },
     globals: { isHardened: () => true, hardenFile: () => ({ ok: true }), startUnifiedHost: input => startUnifiedHost({ ...input,
       bindingOptions: { verify: () => true, harden: () => ({ ok: true }) },
       runtimeOptions: { ...input.runtimeOptions, readWorkspaces: async () => ({ items: [{ workspaceId: 'fixture-workspace', sessionIds: [...sessionPresets.keys()] }], archivedSessionIds: [] }) },
@@ -474,4 +474,58 @@ test('legacy active command never clears manual pause and control messages stay 
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.temp, 'state/current-role.json'))).mode, 'active');
   assert.equal((await h.unifiedDriver.status()).counts.total, 0);
   assert.equal(h.calls.created.length, 0); assert.equal(h.calls.prompts.length, 0);
+});
+
+test('actual bridge starts on an activated ledger, recovers retained arrivals offline and routes new QQ through the same journal', async t => {
+  const { cutoverFixture, current } = await import('./fixture-unified-cutover.mjs');
+  const legacy = await cutoverFixture(t); legacy.activate();
+  legacy.journal.append(current, { account: '100', scene: 'group:456', kind: 'message', sourceId: 'before-start',
+    at: 1000, payload: { text: 'from downtime', senderQQ: '999', reason: 'mention' } });
+  legacy.close(); // A real restart: copy closed SQLite files, never a live WAL main file.
+  const h = await fixture(t, {}, {}, {
+    'state/unified.sqlite': fs.readFileSync(path.join(legacy.root, 'unified.sqlite')),
+    'state/migration-ingress.sqlite': fs.readFileSync(path.join(legacy.root, 'ingress.sqlite')),
+  });
+  h.setReady(false);
+  assert.equal((await h.unifiedDriver.tick()).status, 'paused');
+  await h.receive('private:123', 6, 'fresh');
+  await h.receive('private:123', 6, 'fresh');
+  const db = new DatabaseSync(path.join(h.temp, 'state/unified.sqlite'), { readOnly: true });
+  const journal = new DatabaseSync(path.join(h.temp, 'state/migration-ingress.sqlite'), { readOnly: true });
+  try {
+    assert.equal(journal.prepare('SELECT transferred FROM barrier').get().transferred, 2);
+    assert.deepEqual(db.prepare('SELECT source_id,unread FROM events ORDER BY seq').all().map(r => [r.source_id,r.unread]), [['before-start',1],['6',1]]);
+    assert.equal(db.prepare('SELECT paused FROM accounts').get().paused, 1);
+    assert.equal(h.calls.created.length, 0); assert.equal(h.calls.prompts.length, 0);
+  } finally { db.close(); journal.close(); }
+});
+
+test('actual capture-only boot never loads corrupt legacy sessions, starts DSH or executes queued owner commands', async t => {
+  const { cutoverFixture } = await import('./fixture-unified-cutover.mjs');
+  const f = await cutoverFixture(t); f.close();
+  const handlers = {};
+  class ReceiverBot {
+    on(k,fn) { handlers[k] = fn; }
+    onPrivateMessage(fn) { handlers.private = fn; }
+    onGroupMessage(fn) { handlers.group = fn; }
+    onRequest(k,fn) { handlers[k] = fn; }
+    getLoginInfo() { return { user_id: 100 }; }
+    async connect() { handlers.open(); }
+    close() {}
+  }
+  const h = await bridgeHarness({ args:['--migration-receive-only=100'], files: {
+    'state/mode.json': { mode:'reserved2' }, 'state/sessions.json':'untouched old bytes',
+    'state/migration-ingress.sqlite':fs.readFileSync(path.join(f.root,'ingress.sqlite')),
+    'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml':'[]' },
+    globals:{ SnowLumaWebSocketClient:ReceiverBot, discoverSnowLumaConnection:async()=>({ok:true,self:{user_id:100}}),
+      isHardened:()=>true,hardenFile:()=>({ok:true}) } });
+  t.after(()=>h.close());
+  await new Promise(r=>setImmediate(r));
+  assert.equal(h.receiver.verified,true);
+  handlers.private({ post_type:'message', message_type:'private', user_id:123, self_id:100, message_id:1, time:23,message:'/reset' });
+  assert.equal(fs.readFileSync(path.join(h.temp,'state/sessions.json'),'utf8'),'untouched old bytes');
+  assert.equal(fs.existsSync(path.join(h.temp,'state/unified.sqlite')),false);
+  const db = new DatabaseSync(path.join(h.temp,'state/unified-raw.sqlite'),{readOnly:true});
+  try { assert.equal(db.prepare('SELECT status FROM raw').get().status,'pending'); } finally { db.close(); }
+  assert.equal(h.calls.prompts.length,0); assert.equal(h.calls.sent.length,0);
 });

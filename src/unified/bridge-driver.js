@@ -35,6 +35,7 @@ export function createUnifiedBridgeDriver({ createHost, ready, replayPersisted, 
   return {
     async status() { if (closing) return { ready: false, closing: true }; return host ? host.status() : { ready: false }; },
     async ingest(input) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.ingest(input); },
+    async replayCutover() { const current = await ensure(); return current.replayCutover(); },
     async wakeConfig(key) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.wakeConfig(key); },
     async friendRequest(event) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.friendRequest(event); },
     async fromQQ(...args) { const current = await ensure(); if (closing) throw fail('RUNTIME_CLOSED'); return current.fromQQ(...args); },
@@ -82,8 +83,13 @@ export async function assertLegacySessionsIdle(api, ids) {
 
 // Read-only startup fence, before the bridge loads/saves old state. Disabling
 // unified configuration is not a rollback transaction and cannot revive legacy.
-export function assertMigrationStartup(file, unifiedConfigured) {
-  if (!fs.existsSync(file)) return;
+export function assertMigrationStartup(file, unifiedConfigured, journalFile) {
+  const retained = journalFile && fs.lstatSync(journalFile, { throwIfNoEntry: false });
+  if (retained && !unifiedConfigured) throw fail('MIGRATION_LEGACY_START_BLOCKED');
+  if (!fs.existsSync(file)) {
+    if (retained) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+    return;
+  }
   let db;
   try {
     const stat = fs.lstatSync(file);
@@ -91,8 +97,12 @@ export function assertMigrationStartup(file, unifiedConfigured) {
     db = new DatabaseSync(file, { readOnly: true });
     if (db.prepare('PRAGMA application_id').get().application_id !== 0x51515541) throw fail('MIGRATION_STARTUP_UNVERIFIED');
     const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_imports'").get();
-    if (!table) return;
+    if (!table) {
+      if (retained) throw fail('MIGRATION_STARTUP_UNVERIFIED');
+      return;
+    }
     const batches = db.prepare('SELECT account,snapshot,phase FROM migration_imports').all();
+    if (retained && !batches.length) throw fail('MIGRATION_STARTUP_UNVERIFIED');
     for (const batch of batches) {
       if (!['staged', 'ready'].includes(batch.phase)) throw fail('MIGRATION_STARTUP_UNVERIFIED');
       if (!unifiedConfigured) throw fail('MIGRATION_LEGACY_START_BLOCKED', '此安装已有迁移状态，不能通过关闭统一配置启动旧调度；请完成迁移或受控回退');
@@ -102,6 +112,7 @@ export function assertMigrationStartup(file, unifiedConfigured) {
         if (!decision || decision.account !== batch.account || decision.snapshotId !== batch.snapshot || decision.route !== 'unified') throw fail('MIGRATION_STARTUP_UNVERIFIED');
       }
     }
+    return batches.length > 0;
   } catch (error) {
     if (error.code === 'MIGRATION_LEGACY_START_BLOCKED') throw error;
     throw fail('MIGRATION_STARTUP_UNVERIFIED', '统一迁移状态不可验证，已阻止启动；原数据保持不动');

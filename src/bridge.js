@@ -1,3 +1,4 @@
+import { captureAccount, startCaptureReceiver } from './unified/capture-receiver.js';
 import { createRawInbox } from './unified/raw-inbox.js';
 // QQ ↔ DeepSeek Harness 桥接主程序。
 //
@@ -87,6 +88,7 @@ const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 const RELATIONSHIPS_FILE = path.join(STATE_DIR, 'relationships.json');
 let closeUnifiedOnShutdown = null;
+const captureArg = process.argv?.slice(2).find(arg => arg.startsWith('--migration-receive-only'));
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1414,18 +1416,39 @@ let stateDirHardened = null;
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
   const cfg = loadConfig();
+  if (captureArg !== undefined) {
+    const expected = /^--migration-receive-only=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
+    if (!expected || readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode !== 'reserved2') throw new Error('维护收件须指定账号和已有二代模式');
+    acquireLock({ strict: true });
+    const assertOwner = () => { if (Number(fs.readFileSync(LOCK_FILE, 'utf8')) !== process.pid) throw new Error('维护收件失去安装锁'); };
+    const account = captureAccount({ file: path.join(STATE_DIR, 'migration-ingress.sqlite'), expected,
+      verifyPrivate: isHardened, excluded: unifiedBindingExcluded });
+    const file = path.join(STATE_DIR, 'unified-raw.sqlite');
+    const inbox = createRawInbox({ file, verifyPrivate: isHardened, hardenFile,
+      assertAccess: () => { assertOwner(); if (!unifiedBindingExcluded(file)) throw new Error('unsafe raw inbox'); } });
+    const conn = await discoverSnowLumaConnection({ cfg });
+    if (!conn.ok || String(conn.self?.user_id) !== account) throw new Error('维护收件未验证到目标网关账号');
+    const bot = new SnowLumaWebSocketClient({ url: conn.wsUrl || cfg.snowluma.wsUrl,
+      accessToken: conn.wsToken || cfg.snowluma.accessToken || undefined, reconnect: true });
+    let lastStatus;
+    const receiver = await startCaptureReceiver({ account, bot, inbox, allowed: (kind,id) => allowed(kind,id,cfg),
+      relationships: relationshipConfig(cfg.socialV2?.relationships).enabled,
+      status: value => { if (value !== lastStatus) log('[migration] 只收件：' + value); lastStatus = value; } });
+    closeUnifiedOnShutdown = () => receiver.close();
+    return receiver;
+  }
   // Startup-only opt-in: changing the JSON does not hot-switch between owners.
   const unifiedConfigured = cfg.socialV2?.unified?.enabled === true;
   const unifiedWorkspaceId = String(cfg.socialV2?.unified?.workspaceId || '').trim();
   if (unifiedConfigured && !unifiedWorkspaceId) throw new Error('统一模式需要显式配置现有 workspaceId；不会自动迁移或新建工作区');
   let unifiedDriver = null;
-  let unifiedLoginPending = null, rawInbox;
+  let unifiedLoginPending = null, unifiedLoginHold, rawInbox;
   const unifiedConsoleRequests = new WeakSet();
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  hardenStateDirAcl();
-  assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured);
+  assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured, path.join(STATE_DIR, 'migration-ingress.sqlite'));
   acquireLock({ strict: unifiedConfigured });
-  assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured);
+  const hasMigration = assertMigrationStartup(path.join(STATE_DIR, 'unified.sqlite'), unifiedConfigured, path.join(STATE_DIR, 'migration-ingress.sqlite'));
+  hardenStateDirAcl();
   loadState();
 
   const sharedMemory = createSharedMemory({ file: path.join(STATE_DIR, 'memory.sqlite'), sanitize: redactSensitiveText });
@@ -11230,7 +11253,7 @@ async function main() {
     }
     if (unifiedConfigured) {
       if (!snowlumaHealth.connected || (!unifiedLoginPending && String(event.self_id) !== selfUserId)) return;
-      rawInbox.capture(key, event);
+      rawInbox.capture(key, event, unifiedLoginPending ? unifiedLoginHold : undefined);
       if (unifiedLoginPending) await unifiedLoginPending;
       await rawInbox.drain(selfUserId);
       return;
@@ -12285,7 +12308,7 @@ async function main() {
       return relative.startsWith('..' + path.sep) || path.isAbsolute(relative);
     });
   }
-  async function handleUnifiedIncoming(key, kind, event) {
+  async function handleUnifiedIncoming(key, kind, event, prepare) {
     if (unifiedLoginPending) await unifiedLoginPending;
     if (!unifiedDriver || !selfUserId || String(event.self_id) !== selfUserId || !snowlumaHealth.connected) throw new Error('QQ identity unavailable');
     const management = await unifiedDriver.fromQQ(bot, event);
@@ -12293,19 +12316,28 @@ async function main() {
       if (management.response) await sendToQQ(key, management.response);
       return;
     }
-    const content = typeof event.message === 'string' ? event.message : await segmentsToText(event.message || [], { includeReply: false });
-    const quotedSelf = Array.isArray(event.message) && await isQuoteTargetSelf(event.message, kind, key.split(':')[1], event.self_id);
-    const st = getSocialV2State(key);
-    const wakeConfig = await unifiedDriver.wakeConfig(key);
-    const reason = evaluateWakeTriggerV2(key, { ...st, wakeConfig }, event, kind, content, content, quotedSelf);
-    const sourceId = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '')
-      || crypto.createHash('sha256').update(JSON.stringify([event.self_id, key, event.user_id, event.time, event.message])).digest('hex');
-    const payload = {
-      text: content, senderQQ: String(event.user_id), sender: event.sender?.card || event.sender?.nickname || String(event.user_id),
-      messageId: sourceId, reason: reason || null,
-      media: extractMediaFromSegments(Array.isArray(event.message) ? event.message : []),
-    };
-    await unifiedDriver.ingest({ sourceAccount: String(event.self_id), key, sourceId, payload, at: Number(event.time) > 0 ? Number(event.time) * 1000 : Date.now(), wake: !!reason });
+    const input = await prepare(async () => {
+      const content = typeof event.message === 'string' ? event.message : await segmentsToText(event.message || [], { includeReply: false });
+      const quotedSelf = Array.isArray(event.message) && await isQuoteTargetSelf(event.message, kind, key.split(':')[1], event.self_id);
+      const st = getSocialV2State(key);
+      const wakeConfig = await unifiedDriver.wakeConfig(key);
+      const reason = evaluateWakeTriggerV2(key, { ...st, wakeConfig }, event, kind, content, content, quotedSelf);
+      const sourceId = String(event.message_id ?? event.msg_id ?? event.message_seq);
+      const payload = {
+        text: content, senderQQ: String(event.user_id), sender: event.sender?.card || event.sender?.nickname || String(event.user_id),
+        messageId: sourceId, reason: reason || null,
+        // Only a gateway-supplied message ID + unmodified text can recover a
+        // truncated legacy text record. A synthesized rendering is not proof.
+        ...(event.message_id != null && (typeof event.message === 'string'
+          ? !event.message.includes('[CQ:') && content === event.message
+          : event.message.every(p => p?.type === 'text' && typeof p.data?.text === 'string')
+            && content === event.message.map(p => p.data.text).join('')) ? { gatewayPlainText: true } : {}),
+        media: extractMediaFromSegments(Array.isArray(event.message) ? event.message : []),
+      };
+      return { sourceAccount: String(event.self_id), key, sourceId, payload, at: Number(event.time) * 1000, wake: !!reason };
+    });
+    await unifiedDriver.ingest(input);
+    const { payload, sourceId } = input, content = payload.text;
     withMemory(() => sharedMemory.record({ accountQQ: String(event.self_id), source: key, actorQQ: event.user_id,
       name: payload.sender, text: content, externalId: sourceId, time: Number(event.time) * 1000, kind: 'message' }));
   }
@@ -12337,12 +12369,16 @@ async function main() {
     });
     const rawFile = path.join(STATE_DIR, 'unified-raw.sqlite');
     rawInbox = createRawInbox({ file: rawFile, verifyPrivate: isHardened, hardenFile,
-      deliver: (key, kind, event) => key === 'friend-requests' ? unifiedDriver.friendRequest(event) : handleUnifiedIncoming(key, kind, event),
+      beforeCommand: () => unifiedDriver.replayCutover(),
+      deliver: (key, kind, event, prepare) => key === 'friend-requests' ? unifiedDriver.friendRequest(event) : handleUnifiedIncoming(key, kind, event, prepare),
       assertAccess: () => { assertUnifiedInstallation(); if (!unifiedBindingExcluded(rawFile)) throw new Error('unsafe raw inbox'); },
       allowed: (account, key) => account === selfUserId && !unifiedLoginPending && snowlumaHealth.connected && (key === 'friend-requests' ? relationshipEnabled() : isSessionAllowedInCurrentMode(key)),
     });
     unifiedDriver = createUnifiedBridgeDriver({ log,
-      replayPersisted: () => rawInbox.drain(selfUserId),
+      replayPersisted: async () => {
+        if (hasMigration && selfUserId && !unifiedLoginPending && snowlumaHealth.connected) await unifiedDriver.replayCutover();
+        await rawInbox.drain(selfUserId);
+      },
       ready: () => !!selfUserId && unifiedContext().enabled && !socialV2.paused,
       createHost: () => {
         if (!selfUserId) throw new Error('机器人身份尚未验证');
@@ -12350,6 +12386,9 @@ async function main() {
         return startUnifiedHost({ bindingFile: path.join(STATE_DIR, 'unified-mcp.json'),
           assertInstallationOwner: assertUnifiedInstallation, isExcludedFromModelFiles: unifiedBindingExcluded,
           runtimeOptions: {
+            cutoverInbox: { file: path.join(STATE_DIR, 'migration-ingress.sqlite'), verifyPrivate: isHardened, excluded: unifiedBindingExcluded,
+              wakeAllowed: row => row.kind === 'message' ? !!row.payload.reason : row.payload.mentioned === true
+                || (row.kind === 'qzone-comment' && cfg.socialV2?.qzone?.autoReplyComments !== false) },
             file: path.join(STATE_DIR, 'unified.sqlite'), workspaceId: unifiedWorkspaceId, api,
             getContext: () => { if (selfUserId !== account) throw new Error('统一模式账号已变化，请完成交接后重启'); return unifiedContext(); },
             isAllowed: key => key === 'qzone' ? cfg.socialV2?.qzone?.enabled === true && v2ToolEnabled('qzoneRead') : isSessionAllowedInCurrentMode(key),
@@ -12448,7 +12487,7 @@ async function main() {
       if (!relationshipEnabled()) return;
       if (unifiedConfigured) {
         if (!snowlumaHealth.connected || (!unifiedLoginPending && String(event?.self_id) !== selfUserId)) return;
-        try { rawInbox.captureFriend(event); }
+        try { rawInbox.captureFriend(event, unifiedLoginPending ? unifiedLoginHold : undefined); }
         catch { log('[unified] 好友申请未通过持久收件校验，未执行关系操作'); return; }
         return rawInbox.drain(selfUserId).catch(() => log('[unified] 好友申请仍待处理，未执行关系操作'));
       }
@@ -12534,15 +12573,21 @@ async function main() {
     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
     void pollSnowlumaStatus();
     // 读取机器人昵称（用于社交模式"被提到"识别）；重连后也会刷新
+    const loginHold = unifiedConfigured ? 'login:' + crypto.randomUUID() : undefined;
+    if (unifiedConfigured) unifiedLoginHold = loginHold;
     const loginPending = bot.getLoginInfo().then((login) => {
+      if (unifiedConfigured && (unifiedLoginHold !== loginHold || !snowlumaHealth.connected)) return;
       if (login?.nickname) {
         selfNickname = String(login.nickname).toLowerCase();
         selfDisplayName = String(login.nickname).trim();
         log(`机器人昵称: ${login.nickname}`);
       }
-      if (login?.user_id != null) selfUserId = String(login.user_id);
+      if (login?.user_id != null) {
+        if (unifiedConfigured) rawInbox.confirmLogin(String(login.user_id), loginHold);
+        selfUserId = String(login.user_id);
+      }
       else if (unifiedConfigured) selfUserId = '';
-    }).catch(() => { if (unifiedConfigured) selfUserId = ''; }).finally(() => { if (unifiedLoginPending === loginPending) unifiedLoginPending = null; });
+    }).catch(() => { if (unifiedConfigured && unifiedLoginHold === loginHold) selfUserId = ''; }).finally(() => { if (unifiedLoginPending === loginPending) unifiedLoginPending = null; });
     if (unifiedConfigured) unifiedLoginPending = loginPending;
     // 连接成功后顺手确认一下 token 是否已跟当前账号对齐；不一致就写回 config.json，
     // 让 MCP 工具（另一个进程）也能拿到正确的 token。
@@ -12646,6 +12691,7 @@ async function main() {
   }
 
   bot.on('close', (info) => {
+    if (unifiedConfigured) { unifiedLoginHold = undefined; selfUserId = ''; }
     snowlumaHealth.connected = false;
     log(`SnowLuma 连接断开（code=${info?.code ?? '?'}），重连中…`);
     // 连不上时最常见的原因就是换了 QQ 账号 → token 变了；顺手自愈。
@@ -12694,7 +12740,8 @@ async function gracefulShutdown() {
   log('退出中…');
   try { await closeUnifiedOnShutdown?.(); }
   catch { log('[unified] 关闭时未能完成凭据清理，旧凭据已撤销；下次启动须核验运行权'); }
-  saveState(); releaseLock(); process.exit(0);
+  if (captureArg === undefined) saveState();
+  releaseLock(); process.exit(0);
 }
 process.on('SIGINT', () => { void gracefulShutdown(); });
 process.on('SIGTERM', () => { void gracefulShutdown(); });
@@ -12713,7 +12760,7 @@ process.on('unhandledRejection', (error) => {
  */
 process.on('uncaughtException', (error) => {
   try { log('致命异常（进程即将退出）:', error?.stack ?? error?.message ?? error); } catch {}
-  try { saveState(); } catch {}
+  try { if (captureArg === undefined) saveState(); } catch {}
   releaseLock();
   process.exit(1);
 });

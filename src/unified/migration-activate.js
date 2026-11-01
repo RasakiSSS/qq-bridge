@@ -82,7 +82,7 @@ export function activateStagedMigration({ store, stage, journal, handle, lease, 
         if (!timer || timer.token !== context.timer.sourceId || timer.due_at !== context.timer.dueAt) throw fail('MIGRATION_CONFLICT');
       }
     }
-    const record = { snapshotId: handle.snapshotId, account, epoch: identity.epoch, ingressThrough: barrier.transferred, at: now, route: 'unified' };
+    const record = { snapshotId: handle.snapshotId, account, epoch: identity.epoch, provenance: identity.provenance, ingressThrough: barrier.transferred, at: now, route: 'unified' };
     store.db.prepare('INSERT INTO migration_preserved VALUES(?,?,?)').run(account, 'cutover', JSON.stringify(record));
     store.db.prepare("UPDATE migration_imports SET phase='ready' WHERE account=? AND phase='staged'").run(account);
     // Preserve manual pause. Imported backlog is a wake candidate, still subject

@@ -28,3 +28,25 @@ test('restart recovers original QQ event and never repeats an uncertain owner co
   assert.throws(() => recovered.capture('private:124', { ...msg, message: 'conflicting content' }), /RAW_EVENT_CONFLICT/);
   assert.throws(() => recovered.capture('private:124', { ...msg, time: undefined }), /INVALID_RAW_EVENT/);
 });
+
+test('maintenance receiver stores pre-login messages provisionally and only releases the verified connection generation', async t => {
+  const { startCaptureReceiver } = await import('../src/unified/capture-receiver.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-capture-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const events = {}, deliveries = [], account = '100', statuses = [];
+  let resolveLogin;
+  const bot = { on: (k,f) => events[k]=f, onGroupMessage: f => events.group=f, onPrivateMessage: f => events.private=f,
+    onRequest: (k,f) => events[k]=f, getLoginInfo: () => new Promise(r => resolveLogin=r), connect: async () => { events.open(); }, close() {} };
+  const opts = { file:path.join(dir,'raw.sqlite'), verifyPrivate:()=>true,hardenFile:()=>({ok:true}), assertAccess(){}, allowed:()=>true,
+    deliver: async (_key,_kind,e) => deliveries.push(e.message_id) };
+  const inbox = createRawInbox(opts);
+  const recv = await startCaptureReceiver({ account,bot,inbox,allowed:()=>true,relationships:true,status:s=>statuses.push(s) });
+  const msg = id => ({ post_type:'message',message_type:'private',self_id:100,user_id:123,message_id:id,time:1000,message:'hello' });
+  events.private(msg(1)); resolveLogin({user_id:999}); await new Promise(r=>setImmediate(r));
+  events.close(); events.open(); await Promise.resolve(); events.private(msg(2)); resolveLogin({user_id:100});
+  await new Promise(r=>setImmediate(r)); assert.equal(recv.verified,true);
+  events.private(msg(3)); assert.deepEqual(deliveries,[]);
+  await recv.close();
+  const next = createRawInbox(opts); await next.drain(account);
+  assert.deepEqual(deliveries,[2,3]); assert.ok(statuses.includes('unverified')); await next.close();
+});

@@ -1,3 +1,4 @@
+import { captureAccount, startCaptureReceiver } from '../src/unified/capture-receiver.js';
 // Execute the real bridge initialization/functions against temporary files and fake peers.
 // No production config, QQ connection, DSH process, or persistent home is accessed.
 import fs from 'node:fs';
@@ -38,7 +39,7 @@ import * as unifiedFiles from '../src/unified/files.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
+export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {}, args = [] } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-audit-bridge-'));
   fs.mkdirSync(path.join(temp, 'src'));
   fs.mkdirSync(path.join(temp, 'state'));
@@ -52,7 +53,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   for (const [rel, content] of Object.entries(files)) {
     const target = path.join(temp, rel);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content));
+    fs.writeFileSync(target, typeof content === 'string' || Buffer.isBuffer(content) ? content : JSON.stringify(content));
   }
   const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [], requests: [], requestHandlers: [] };
   // 语音发送在桥接里是**直接 fetch 网关**（与文本/表情共用 sendChain，但要自己带 record 段），
@@ -190,7 +191,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     execFileSync: () => '',
     // process 桩要带 env：voice-core / bridge 会读 process.env.FFMPEG_PATH、FFPROBE_PATH 等。
     // 之前只给 pid/platform/kill/exit，导致 `process.env.FFMPEG_PATH` 直接抛 TypeError。
-    process: { pid: process.pid, platform: process.platform, kill: process.kill, env: {}, exit: (code) => { throw new Error('unexpected exit ' + code); } },
+    process: { argv: ['node', 'bridge.js', ...args], pid: process.pid, platform: process.platform, kill: process.kill, env: {}, exit: (code) => { throw new Error('unexpected exit ' + code); } },
     setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; },
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
@@ -198,7 +199,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
-    createRawInbox, ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
+    captureAccount, startCaptureReceiver, createRawInbox, ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -227,6 +228,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   vm.runInContext(`Object.assign(globalThis, (() => { ${modelViewSource}\nreturn { compactModelMessage, compactModelData, serializeModelData }; })());`, context);
   vm.runInContext(source + '\nglobalThis.auditReady = main();', context);
   const bridge = await context.auditReady;
+  if (args.some(a => a.startsWith('--migration-receive-only'))) return { receiver: bridge, temp, calls,
+    async close() { await bridge.close(); fs.rmSync(temp, { recursive: true, force: true }); } };
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2', 'qq-chat-v2-files', 'qq-qzone', 'qq-memory']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {

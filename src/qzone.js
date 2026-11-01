@@ -415,27 +415,31 @@ export function createQzoneService({ file, getConfig, request, assertAllowed, au
         if (!force && now() < (a.nextEventAt || 0)) return { status: 'idle' };
         await browse(qq, a, context);
         await confirmAccount(qq, context, 'read');
-        let delivered = 0;
-        const eventTime = value => Number.isSafeInteger(value) && value > 0 ? value : now();
+        let delivered = 0, missingTime = 0;
+        const eventTime = value => Number.isSafeInteger(value) && value > 0 ? value : null;
         for (const feed of a.pendingFeeds) {
           check(context, 'read');
           if (feed.authorQQ === qq) continue;
+          const at = eventTime(Number(feed.time) * 1000);
+          if (at === null) { missingTime++; continue; }
           await deliver({ accountQQ: qq, sourceId: feed.key, kind: 'qzone-feed',
-            payload: { ...feed, text: feed.content }, at: eventTime(Number(feed.time) * 1000), wake: feed.mentioned === true });
+            payload: { ...feed, text: feed.content }, at, wake: feed.mentioned === true });
           delivered++;
         }
         for (const comment of Object.values(a.comments)) {
           if (comment.status !== 'new' || !(comment.ownerQQ === qq || comment.mentioned
             || a.writes.some(w => w.kind === 'comment' && w.tid === comment.tid && w.ownerQQ === comment.ownerQQ && w.status === 'sent'))) continue;
           check(context, 'read');
+          const at = eventTime(Number(comment.time));
+          if (at === null) { missingTime++; continue; }
           await deliver({ accountQQ: qq, sourceId: comment.key, kind: 'qzone-comment',
-            payload: { ...comment, text: comment.content }, at: eventTime(Number(comment.time)),
+            payload: { ...comment, text: comment.content }, at,
             wake: comment.mentioned === true || cfg().autoReplyComments });
           delivered++;
         }
         check(context, 'read');
         a.nextEventAt = now() + cfg().eventPollIntervalMs; save();
-        return { status: 'collected', events: delivered };
+        return { status: 'collected', events: delivered, ...(missingTime ? { missingTime } : {}) };
       });
     } catch (error) {
       retryAt = now() + 60000;

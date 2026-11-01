@@ -1,44 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { createUnifiedBridgeDriver, assertMigrationStartup } from '../src/unified/bridge-driver.js';
-import { MigrationIngress, createMigrationBarrier } from '../src/unified/migration-ingress.js';
-import { MigrationStage } from '../src/unified/migration-stage.js';
-import { UnifiedStore } from '../src/unified/store.js';
-import { captureMigrationSnapshot, loadMigrationSnapshot, MIGRATION_SOURCE_FILES } from '../src/unified/migration-snapshot.js';
-import { importStagedMigration } from '../src/unified/migration-import.js';
-import { activateStagedMigration } from '../src/unified/migration-activate.js';
+import { createMigrationBarrier } from '../src/unified/migration-ingress.js';
 import { replayUnifiedIngress, persistUnifiedIngress } from '../src/unified/migration-live-ingress.js';
 
-const current = { account: '100', sourceAccount: '100', epoch: 'fixture', provenance: 'fixture-proof' };
+import { cutoverFixture as fixture, current } from './fixture-unified-cutover.mjs';
 const event = (id = 'new') => ({ account: '100', scene: 'group:1', sourceId: id, kind: 'message', at: 1000, payload: { text: 'complete body', media: [] } });
-async function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cutover-ingress-'));
-  let journal, store;
-  const open = () => {
-    journal = new MigrationIngress({ file: path.join(root, 'ingress.sqlite'), verifyPrivate: () => true, assertExclusive: () => true });
-    store = new UnifiedStore(path.join(root, 'unified.sqlite'));
-  };
-  const close = () => { journal?.close(); store?.close(); journal = store = undefined; };
-  open();
-  const stage = new MigrationStage({ file: path.join(root, 'stage.sqlite'), verifyPrivate: () => true });
-  t.after(() => { close(); stage.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  journal.begin(current);
-  const lease = { assert: () => ({ ...current, quiesced: true }), release() {} };
-  const files = Object.fromEntries(Object.keys(MIGRATION_SOURCE_FILES).map(key => [key, null]));
-  files['social-v2.json'] = Buffer.from('{"paused":true,"conversations":{}}');
-  files['sessions.json'] = Buffer.from('{"sessions":{}}'); files['config.json'] = Buffer.from('{}');
-  const captured = await captureMigrationSnapshot({ root, verifyPrivate: () => true, acquire: () => lease, readFiles: () => files });
-  const handle = loadMigrationSnapshot({ ...captured, expectedAccount: '100', attest: () => true, verifyPrivate: () => true });
-  journal.bindSnapshot(current, handle); stage.importSnapshot(handle);
-  importStagedMigration({ store, stage, account: '100', assertExclusive: () => true });
-  return { root, stage, handle, lease, open, close, get journal() { return journal; }, get store() { return store; },
-    activate: () => activateStagedMigration({ journal, store, stage, handle, lease }),
-    options: () => ({ journal, store, current, wakeAllowed: () => true }) };
-}
 
 test('after activation arrivals remain durable while target is unavailable, then replay without DSH or legacy work', async t => {
   const f = await fixture(t); f.activate();
@@ -159,4 +129,56 @@ test('a journal missing committed source rows cannot report a completed delivery
   f.journal.db.prepare('DELETE FROM incoming WHERE seq=1').run();
   assert.throws(() => replayUnifiedIngress(f.options()), { code: 'MIGRATION_CONFLICT' });
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, 2);
+});
+
+test('bridge cutover route uses the attested journal and resumes a committed arrival before fresh traffic', async t => {
+  const { openCutoverInbox } = await import('../src/unified/cutover-inbox.js');
+  const f = await fixture(t);
+  const options = { store: f.store, account: '100', file: path.join(f.root, 'ingress.sqlite'),
+    assertOwner() {}, excluded: () => true, verifyPrivate: () => true, wakeAllowed: row => !!row.payload.reason };
+  assert.throws(() => openCutoverInbox(options), { code: 'MIGRATION_PENDING' });
+  f.activate();
+  f.journal.append(current, event('between-processes'));
+  assert.throws(() => openCutoverInbox({ ...options, account: '101' }), { code: 'MIGRATION_SOURCE_CHANGED' });
+  assert.throws(() => openCutoverInbox({ ...options, file: path.join(f.root, 'missing') }), { code: 'MIGRATION_SOURCE_CHANGED' });
+  const route = openCutoverInbox(options);
+  try {
+    const input = { key: 'group:1', sourceId: 'next', at: 2000, payload: { text: 'complete', reason: 'mention' } };
+    route.ingest(input); route.ingest(input);
+    const result = route.friendRequest({ self_id: 100, user_id: 123, post_type: 'request', request_type: 'friend', flag: 'fixture-request', time: 2 });
+    assert.equal(result.status, 'pending');
+    assert.equal(f.journal.db.prepare('SELECT transferred FROM barrier').get().transferred, 3);
+    assert.deepEqual(f.store.db.prepare('SELECT source_id,wake FROM events ORDER BY seq').all().map(r => [r.source_id,r.wake]), [['between-processes',0],['next',1]]);
+  } finally { route.close(); }
+});
+
+test('recollecting an identical imported Qzone preview preserves its read flag and never upgrades it to original text', async t => {
+  const { openCutoverInbox } = await import('../src/unified/cutover-inbox.js');
+  const feed = { key: 'post:999:one', authorQQ: '999', tid: 'one', time: 1, content: 'preview' };
+  const data = { pendingFeeds: [], seenFeeds: [feed.key], knownPosts: { [feed.key]: feed }, comments: {}, ownPosts: [], writes: [] };
+  const f = await fixture(t, { qzone: { version: 1, accounts: { '100': data } } }); f.activate();
+  const route = openCutoverInbox({ store: f.store, account: '100', file: path.join(f.root, 'ingress.sqlite'), assertOwner() {},
+    excluded: () => true, verifyPrivate: () => true, wakeAllowed: () => true });
+  try {
+    const input = { key: 'qzone', sourceId: feed.key, kind: 'qzone-feed', at: 1000, payload: { ...feed, text: feed.content } };
+    route.ingest(input);
+    assert.throws(() => route.ingest({ ...input, payload: { ...input.payload, text: 'edited' } }), { code: 'MIGRATION_CONFLICT' });
+    const rows = f.store.db.prepare("SELECT unread,payload FROM events WHERE scene='qzone'").all();
+    assert.equal(rows.length, 1); assert.equal(rows[0].unread, 0); assert.equal(JSON.parse(rows[0].payload).originalUnavailable, true);
+    assert.equal(f.journal.db.prepare('SELECT COUNT(*) AS n FROM incoming').get().n, 0);
+  } finally { route.close(); }
+});
+
+test('attested gateway text upgrades exactly one legacy preview and retains the original read receipt state', async t => {
+  const text = 'x'.repeat(200) + ' recovered middle ' + 'y'.repeat(200);
+  const old = { seq: 1, messageId: '55', userId: '999', text: text.slice(0,200), plain: text.slice(0,200), tail: text.slice(-200), time: 1033 };
+  const scene = { unread: [], recentMessages: [old], lastUnreadSeq: 1, lastReadThroughSeq: 1, wakeConfig: {} };
+  const f = await fixture(t, { social: { paused: true, conversations: { 'group:1': scene } } }); f.activate();
+  const before = f.store.db.prepare('SELECT seq,unread FROM events').get();
+  const payload = { text, messageId: '55', senderQQ: '999', gatewayPlainText: true, media: [] };
+  persistUnifiedIngress(f.options(), { ...event('55'), payload });
+  const after = f.store.db.prepare('SELECT * FROM events').get();
+  assert.equal(after.seq,before.seq); assert.equal(after.unread,0); assert.equal(after.at,1000); assert.equal(JSON.parse(after.payload).text,text);
+  assert.equal(JSON.parse(f.store.db.prepare('SELECT payload FROM migration_sources').get().payload).at,1033);
+  assert.equal(replayUnifiedIngress(f.options()).pending,0);
 });

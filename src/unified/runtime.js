@@ -1,3 +1,4 @@
+import { openCutoverInbox } from './cutover-inbox.js';
 import { UnifiedPersona } from './persona.js';
 import { UnifiedStore, fail } from './store.js';
 import { UnifiedScenes } from './scenes.js';
@@ -21,7 +22,7 @@ export class UnifiedRuntime {
   #bindingTail = Promise.resolve();
   #frameTail = Promise.resolve();
   #closed = false;
-  constructor({ file, getContext, isAllowed, isWakeAllowed, api, workspaceId,
+  constructor({ file, cutoverInbox, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
     handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, memory, summaries, readPersona, legacyCommand, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
@@ -36,6 +37,8 @@ export class UnifiedRuntime {
         if (ctx.account !== account) throw fail('IDENTITY_CHANGED');
         return ctx;
       };
+      if (cutoverInbox) this.cutoverInbox = openCutoverInbox({ ...cutoverInbox, store: this.store, account,
+        assertOwner: () => { ownedContext(); } });
       this.api = api;
       this.beforeSession = beforeSession;
       this.bindMainTools = bindMainTools;
@@ -87,7 +90,7 @@ export class UnifiedRuntime {
       });
       this.scheduler.recoverPreparing(account);
       this.actions.recoverPreparing(account);
-    } catch (error) { this.owner?.release(); this.store.close(); throw error; }
+    } catch (error) { this.cutoverInbox?.close(); this.owner?.release(); this.store.close(); throw error; }
   }
   #context() {
     if (this.#closed) throw fail('RUNTIME_CLOSED');
@@ -128,6 +131,7 @@ export class UnifiedRuntime {
     if (sourceAccount !== undefined && sourceAccount !== ctx.account) throw fail('ACCOUNT_MISMATCH');
     if (!this.scenes.allowed(key, ctx)) throw fail('SCENE_DENIED');
     // Pause/peak suppress model activity, not durable incoming messages.
+    if (this.cutoverInbox) return this.cutoverInbox.ingest({ key, sourceId, kind, payload, at });
     return this.store.append({ account: ctx.account, scene: key, sourceId, kind, payload, at, wake });
   }
   // Operator-only snapshot: no inbox receipts, model wake or state normalization.
@@ -145,7 +149,7 @@ export class UnifiedRuntime {
       pendingTimers: db.prepare('SELECT COUNT(*) AS count FROM wake_timers WHERE account=? AND event_seq IS NULL').get(ctx.account).count };
   }
   wakeConfig(key) { this.#context(); return this.attention.config(key); }
-  friendRequest(event) { this.#context(); if (!this.relationships) throw fail('ACTION_DENIED'); return this.relationships.ingest(event); }
+  friendRequest(event) { this.#context(); if (!this.relationships) throw fail('ACTION_DENIED'); return this.cutoverInbox ? this.cutoverInbox.friendRequest(event) : this.relationships.ingest(event); }
   tick() {
     this.#context(); this.attention.materialize();
     return this.scheduler.tick().then(async result => {
@@ -184,6 +188,6 @@ export class UnifiedRuntime {
     this.#closed = true; this.tools.revoke();
     // Host must await in-flight runtime calls before closing. Closing never
     // clears persisted unknown dispatches/actions or cancels a remote turn.
-    try { this.owner.release(); } finally { this.store.close(); }
+    try { this.cutoverInbox?.close(); } finally { try { this.owner.release(); } finally { this.store.close(); } }
   }
 }

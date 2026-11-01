@@ -7,7 +7,7 @@ import { accountId, sceneKey, fail } from './store.js';
 import { managementCommandText } from './management.js';
 
 // Host-only gateway spool. Short transactions; no database handle across awaits.
-export function createRawInbox({ file, assertAccess, verifyPrivate, hardenFile, deliver, allowed }) {
+export function createRawInbox({ file, assertAccess, verifyPrivate, hardenFile, deliver, allowed, beforeCommand }) {
   let draining, identity, closing = false;
   const empty = new Set();
   function dbCall(fn) {
@@ -36,34 +36,38 @@ export function createRawInbox({ file, assertAccess, verifyPrivate, hardenFile, 
       if (!id && !db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get()) {
         db.exec("CREATE TABLE raw(seq INTEGER PRIMARY KEY, account TEXT NOT NULL, scene TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, UNIQUE(account,scene,source)); CREATE INDEX raw_pending ON raw(account,status,seq); PRAGMA application_id=1364349528");
       } else if (id !== 1364349528) throw fail('UNSAFE_RAW_INBOX');
+      db.exec('CREATE TABLE IF NOT EXISTS prepared(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL)');
       const result = fn(db); db.exec('COMMIT'); return result;
     } finally { db.close(); }
   }
-  function capture(key, event) {
+  function capture(key, event, hold) {
     const account = accountId(String(event.self_id)), id = event.message_id ?? event.msg_id ?? event.message_seq;
     const kind = event.message_type;
     if (!['private','group'].includes(kind) || sceneKey(key) !== kind + ':' + (kind === 'private' ? event.user_id : event.group_id)
         || event.post_type !== 'message' || !(typeof id === 'string' && id.trim() || Number.isSafeInteger(id))
         || !Number.isSafeInteger(Number(event.time) * 1000) || Number(event.time) <= 0
         || !(Array.isArray(event.message) || typeof event.message === 'string')) throw fail('INVALID_RAW_EVENT');
-    save(account, key, String(id), event);
+    save(account, key, String(id), event, hold);
   }
-  function captureFriend(event) {
+  function captureFriend(event, hold) {
     const account = accountId(String(event.self_id)), payload = JSON.stringify(event);
     const { id } = migrationFriendRequest(account, { scene: 'private:' + event.user_id,
       payload, at: Number(event.time) * 1000 });
-    save(account, 'friend-requests', id, event);
+    save(account, 'friend-requests', id, event, hold);
   }
-  function save(account, key, id, event) {
+  function save(account, key, id, event, hold) {
+    if (hold !== undefined && !/^login:[a-f0-9-]{36}$/.test(hold)) throw fail('INVALID_RAW_EVENT');
     const body = JSON.stringify(event);
     dbCall(db => {
-      const stored = db.prepare('SELECT event FROM raw WHERE account=? AND scene=? AND source=?').get(account,key,String(id));
+      const stored = db.prepare('SELECT event,status FROM raw WHERE account=? AND scene=? AND source=?').get(account,key,String(id));
       if (stored) {
         const old = JSON.parse(stored.event), incoming = JSON.parse(body);
         if (String(old.user_id) !== String(event.user_id) || Number(old.time) !== Number(event.time)
             || (key === 'friend-requests' && (old.comment !== incoming.comment || old.sub_type !== incoming.sub_type))
             || !isDeepStrictEqual(old.message,incoming.message)) throw fail('RAW_EVENT_CONFLICT');
-      } else db.prepare("INSERT INTO raw(account,scene,source,event,status) VALUES(?,?,?,?,'pending')").run(account,key,String(id),body);
+        if (stored.status.startsWith('login:')) db.prepare('UPDATE raw SET status=? WHERE account=? AND scene=? AND source=?')
+          .run(hold ?? 'pending',account,key,String(id));
+      } else db.prepare('INSERT INTO raw(account,scene,source,event,status) VALUES(?,?,?,?,?)').run(account,key,String(id),body,hold ?? 'pending');
     });
     empty.delete(account);
   }
@@ -84,8 +88,22 @@ export function createRawInbox({ file, assertAccess, verifyPrivate, hardenFile, 
         });
         if (!row) break;
         const event = JSON.parse(row.event);
-        if (event.post_type === 'message' && managementCommandText(event) !== null) dbCall(db => db.prepare("UPDATE raw SET status='command-started' WHERE seq=?").run(row.seq));
-        try { await deliver(row.scene, event.message_type, event); }
+        try {
+          if (event.post_type === 'message' && managementCommandText(event) !== null) {
+            // Do not consume a command merely because the migration route is not ready.
+            if (beforeCommand) await beforeCommand();
+            if (!allowed(account, row.scene)) { blocked.add(row.scene); continue; }
+            dbCall(db => db.prepare("UPDATE raw SET status='command-started' WHERE seq=?").run(row.seq));
+          }
+          const prepare = async build => {
+            const stored = dbCall(db => db.prepare('SELECT payload FROM prepared WHERE seq=?').get(row.seq));
+            if (stored) return JSON.parse(stored.payload);
+            const payload = await build();
+            dbCall(db => db.prepare('INSERT INTO prepared VALUES(?,?)').run(row.seq, JSON.stringify(payload)));
+            return payload;
+          };
+          await deliver(row.scene, event.message_type, event, prepare);
+        }
         catch (error) { firstError ??= error; blocked.add(row.scene); continue; }
         dbCall(db => db.prepare("UPDATE raw SET status='done' WHERE seq=?").run(row.seq));
       }
@@ -93,5 +111,11 @@ export function createRawInbox({ file, assertAccess, verifyPrivate, hardenFile, 
     }).finally(() => { draining = undefined; });
     return draining;
   }
-  return { capture, captureFriend, drain, close() { closing = true; return draining; } };
+  return { capture, captureFriend, drain,
+    confirmLogin(account, hold) {
+      if (!/^login:[a-f0-9-]{36}$/.test(hold)) throw fail('INVALID_RAW_EVENT');
+      if (fs.existsSync(file)) dbCall(db => db.prepare("UPDATE raw SET status='pending' WHERE account=? AND status=?").run(account, hold));
+      empty.delete(account);
+    },
+    close() { closing = true; return draining; } };
 }

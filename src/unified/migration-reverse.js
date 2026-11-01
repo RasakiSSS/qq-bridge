@@ -79,7 +79,7 @@ export function projectLegacyQqRollback({ store, account, social, assertExclusiv
       if (target && wake) target.wakeConfig = { ...target.wakeConfig, ...wake,
         triggers: { ...target.wakeConfig?.triggers, ...wake.triggers } };
     }
-    const events = store.db.prepare("SELECT e.*,s.legacy_seq FROM events e LEFT JOIN migration_sources s ON s.account=e.account AND s.scene=e.scene AND s.source_id=e.source_id WHERE e.account=? AND e.kind='message' AND e.scene!='qzone' ORDER BY e.seq").all(account);
+    const events = store.db.prepare("SELECT e.*,s.legacy_seq,s.payload AS legacy_payload FROM events e LEFT JOIN migration_sources s ON s.account=e.account AND s.scene=e.scene AND s.source_id=e.source_id WHERE e.account=? AND e.kind='message' AND e.scene!='qzone' ORDER BY e.seq").all(account);
     let appended = 0, acknowledged = 0;
     for (const event of events) {
       let state = result.conversations[event.scene];
@@ -99,8 +99,8 @@ export function projectLegacyQqRollback({ store, account, social, assertExclusiv
       let row = candidates[0];
       if (candidates.some(item => item.seq !== row.seq || item.text !== row.text)) throw fail('MIGRATION_CONFLICT');
       if (event.legacy_seq > 0) {
-        const original = JSON.parse(event.payload);
-        if (!row || row.seq !== event.legacy_seq || row.text !== original.text || row.time !== event.at) throw fail('MIGRATION_CONFLICT');
+        const original = JSON.parse(event.legacy_payload);
+        if (!row || row.seq !== event.legacy_seq || row.text !== original.text || row.time !== original.at) throw fail('MIGRATION_CONFLICT');
       } else {
         const payload = JSON.parse(event.payload);
         if (payload.originalUnavailable === true || typeof payload.text !== 'string' || !Number.isSafeInteger(event.at) || event.at <= 0) throw fail('MIGRATION_INVALID_SOURCE');
