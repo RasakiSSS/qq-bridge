@@ -1683,7 +1683,7 @@ async function main() {
     const { accountQQ, sourceId, ...event } = input;
     // Match migration's stable post/comment key; hashing only the live path
     // would duplicate imported unread events on the next collection.
-    await unifiedDriver.ingest({ ...event, key: 'qzone', sourceId });
+    await unifiedDriver.ingest({ ...event, sourceAccount: accountQQ, key: 'qzone', sourceId });
   }
 
   // ── 表情包体系（二代仿真）本地知识库 ────────────────────────────────────
@@ -12301,8 +12301,8 @@ async function main() {
       messageId: sourceId, reason: reason || null,
       media: extractMediaFromSegments(Array.isArray(event.message) ? event.message : []),
     };
-    await unifiedDriver.ingest({ key, sourceId, payload, at: Number(event.time) > 0 ? Number(event.time) * 1000 : Date.now(), wake: !!reason });
-    withMemory(() => sharedMemory.record({ accountQQ: selfUserId, source: key, actorQQ: event.user_id,
+    await unifiedDriver.ingest({ sourceAccount: String(event.self_id), key, sourceId, payload, at: Number(event.time) > 0 ? Number(event.time) * 1000 : Date.now(), wake: !!reason });
+    withMemory(() => sharedMemory.record({ accountQQ: String(event.self_id), source: key, actorQQ: event.user_id,
       name: payload.sender, text: content, externalId: sourceId, time: Number(event.time) * 1000, kind: 'message' }));
   }
 

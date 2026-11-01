@@ -123,8 +123,9 @@ export class UnifiedRuntime {
     this.api.events.follow(sessionId);
     return { status: 'following', sessionId };
   }
-  ingest({ key, sourceId, kind, payload, at, wake }) {
+  ingest({ sourceAccount, key, sourceId, kind, payload, at, wake }) {
     const ctx = this.#context();
+    if (sourceAccount !== undefined && sourceAccount !== ctx.account) throw fail('ACCOUNT_MISMATCH');
     if (!this.scenes.allowed(key, ctx)) throw fail('SCENE_DENIED');
     // Pause/peak suppress model activity, not durable incoming messages.
     return this.store.append({ account: ctx.account, scene: key, sourceId, kind, payload, at, wake });

@@ -311,11 +311,29 @@ test('unified Qzone collection enters durable main inbox without standalone sess
   } finally { sourceDb.close(); }
   h.setReady(true); assert.equal((await h.unifiedDriver.tick()).status, 'idle');
   assert.equal(h.calls.created.length, 0);
-  // Ordinary feeds are available when the main session is woken elsewhere.
-  await h.receive(); await h.unifiedDriver.tick();
-  const cap = JSON.parse((await h.call('qq_join_session', { key: 'qzone' })).text);
-  const page = JSON.parse((await h.call('qq_get_unread_msg', { capability: cap.capability })).text);
-  assert.equal(page.messages[0].payload.text, 'ordinary post');
+  await h.receive('private:123', 1, 'private hello');
+  await h.receive('group:456', 1, 'group hello'); // Same gateway ID in a different scene.
+  await h.unifiedDriver.tick();
+  const menu = async () => JSON.parse((await h.call('qq_get_main_menu')).text).sessions;
+  await assert.rejects(h.unifiedDriver.ingest({ sourceAccount: '101', key: 'group:456', sourceId: 'foreign', payload: { text: 'foreign' } }), { code: 'ACCOUNT_MISMATCH' });
+  const initial = await menu();
+  assert.deepEqual(Object.fromEntries(initial.map(s => [s.key, s.unread])), { 'private:123': 1, 'group:456': 1, qzone: 1 });
+  for (const [key, expected] of [['group:456', 'group hello'], ['qzone', 'ordinary post'], ['private:123', 'private hello']]) {
+    const { capability } = JSON.parse((await h.call('qq_join_session', { key })).text);
+    const page = JSON.parse((await h.call('qq_get_unread_msg', { capability })).text);
+    assert.equal(page.messages.length, 1);
+    assert.equal(page.messages[0].payload.text, expected);
+    if (key !== 'qzone') {
+      const sent = await h.call('qq_send_message', { capability, messages: ['ack ' + expected] }, 'reply-' + key);
+      assert.equal(JSON.parse(sent.text).status, 'succeeded');
+    }
+    await h.call('qq_mark_read', { receipt: page.receipt });
+    await h.call('qq_quit_session');
+    assert.equal((await h.call('qq_get_unread_msg', { capability })).error, true);
+  }
+  assert.ok((await menu()).every(s => s.unread === 0));
+  assert.equal(h.calls.http.filter(x => x.url.endsWith('/send_group_msg')).length, 1);
+  assert.equal(h.calls.http.filter(x => x.url.endsWith('/send_private_msg')).length, 1);
   assert.equal(h.calls.created.length, 1);
   await assert.rejects(Promise.resolve().then(() => h.assertQzoneAllowed(null, 'model')), /统一模式/);
 });
