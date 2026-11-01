@@ -223,7 +223,7 @@ export class UnifiedStore {
     return this.db.prepare('SELECT e.* FROM events e JOIN dispatch_events d ON d.seq=e.seq WHERE d.dispatch=? ORDER BY e.seq').all(id);
   }
   // A terminal acknowledgement must identify this exact request, never merely a recent turn/end.
-  confirm(id, sessionId, outcome) {
+  confirm(id, sessionId, outcome, retryAt = 0) {
     if (!['accepted', 'completed'].includes(outcome)) throw fail('INVALID_CONFIRMATION');
     return this.transaction(() => {
       const row = this.dispatch(id);
@@ -231,7 +231,7 @@ export class UnifiedStore {
       if (row.status === 'completed') return row;
       if (!['dispatching', 'accepted', 'unknown'].includes(row.status)) throw fail('INVALID_CONFIRMATION');
       this.db.prepare('UPDATE dispatches SET status=? WHERE id=?').run(outcome, id);
-      this.db.prepare('UPDATE accounts SET failures=0,retry_at=0 WHERE account=?').run(row.account);
+      this.db.prepare('UPDATE accounts SET failures=0,retry_at=? WHERE account=?').run(retryAt,row.account);
       this.db.prepare('UPDATE events SET notified=1 WHERE seq IN (SELECT seq FROM dispatch_events WHERE dispatch=?)').run(id);
       if (row.status !== 'accepted') this.db.prepare('DELETE FROM attention_waits WHERE account=? AND started<=?').run(row.account, row.created);
       return this.dispatch(id);

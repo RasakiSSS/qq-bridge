@@ -207,9 +207,13 @@ export class UnifiedTools {
         case 'qq_get_main_menu': return this.scenes.menu(a);
         case 'qq_get_current_session': return this.scenes.current();
         case 'qq_join_session': return this.scenes.join(a.key, check);
-        case 'qq_quit_session': return this.scenes.quit(check);
+        case 'qq_quit_session': {
+          const current = this.scenes.current();
+          if (current) this.attention?.observeBeforeSleep(this.scenes.context().account,current.key);
+          return this.scenes.quit(check);
+        }
         case 'qq_get_unread_msg': return this.scenes.read(a.capability, a.limit);
-        case 'qq_mark_read': return this.scenes.markRead(a.receipt);
+        case 'qq_mark_read': return this.scenes.markRead(a.receipt,(account,key)=>this.attention?.observeBeforeSleep(account,key));
         case 'qq_wait_for_events':
           if (!this.attention) throw fail('TOOL_DENIED');
           return this.attention.waitEvents(check);
@@ -229,7 +233,10 @@ export class UnifiedTools {
           const operation = ({ qq_send_message: 'sendMessage', qq_set_wake_config: 'setWakeConfig',
             qq_qzone_status: 'qzoneStatus', qq_qzone_refresh: 'qzoneRefresh',
             qq_qzone_publish: 'qzonePublish', qq_qzone_comment: 'qzoneComment', qq_qzone_reply: 'qzoneReply' })[name];
-          return this.actions.run({ operation, callId: execution?.callId, capability, payload, checkCaller: check });
+          const target = operation === 'sendMessage' ? this.scenes.authorize(capability) : null;
+          const outcome = await this.actions.run({ operation, callId: execution?.callId, capability, payload, checkCaller: check });
+          if (target && outcome.status === 'succeeded') this.attention?.observeBeforeSleep(target.account,target.key,execution.callId);
+          return outcome;
         }
       }
     });

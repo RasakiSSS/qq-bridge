@@ -87,7 +87,7 @@ export class UnifiedScheduler {
         }
         const receipts = [...scopes].map(([key, batch]) => ({ key,
           receipt: this.store.receipt(row.account, key, 'read', batch, this.now()) }));
-        const input = [{ type: 'text', text: json({ requestId: row.id, persona: this.personaStatus(), messages, receipts }, 32768) }];
+        const input = [{ type: 'text', text: json({ requestId: row.id, persona: this.personaStatus(), bridgeGuide: '仅使用统一 qq_ 工具。verifiedOwnerPrivate=true 是桥接核验的管理员私聊。沉睡前由桥接后台观察本场景，不要用短静默反复等待。', messages, receipts }, 32768) }];
         this.store.db.prepare("UPDATE dispatches SET status='dispatching',content=? WHERE id=? AND status='preparing'")
           .run(json(input, 40000), row.id);
         return input;

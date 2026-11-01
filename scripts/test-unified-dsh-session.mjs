@@ -251,3 +251,12 @@ test('schema 1 migration preserves messages, permission, pause and scene', t => 
     assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 6);
   } finally { store.close(); }
 });
+
+test('a correlated provider quota error delays new wakes without marking messages read',t=>{
+  const f=evidenceFixture(t);
+  f.evidence.event('main-1',start()); f.evidence.event('main-1',message());
+  const before=Date.now();
+  f.evidence.event('main-1',event(2,'turn/end',{turn:1,reason:{kind:'error',error:{code:'QUOTA'}}}));
+  assert.ok(f.store.db.prepare('SELECT retry_at FROM accounts').get().retry_at>=before+300000);
+  assert.equal(f.status(),'completed');
+});

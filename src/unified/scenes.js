@@ -215,7 +215,7 @@ export class UnifiedScenes {
     this.store.db.prepare("UPDATE receipts SET status='delivered' WHERE id=?").run(job);
     return { receipt: job, key: row.scene, result: JSON.parse(row.result) };
   }
-  markRead(id) {
+  markRead(id, afterRead) {
     const ctx = this.context();
     return this.store.transaction(() => {
       const row = this.store.db.prepare('SELECT * FROM receipts WHERE id=? AND account=?').get(id, ctx.account);
@@ -226,6 +226,7 @@ export class UnifiedScenes {
       const marked = this.store.db.prepare('UPDATE events SET unread=0 WHERE account=? AND scene=? AND unread=1 AND seq IN (SELECT seq FROM receipt_events WHERE receipt=? AND covered=1)')
         .run(ctx.account, row.scene, id).changes;
       this.store.db.prepare("UPDATE receipts SET status='acked' WHERE id=?").run(id);
+      if (marked && row.kind === 'read') afterRead?.(ctx.account,row.scene);
       return { marked, reason: row.kind === 'skip' ? 'intentional-skip' : row.kind };
     });
   }

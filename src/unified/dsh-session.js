@@ -162,7 +162,8 @@ export class UnifiedDshEvidence {
       let confirmed = false;
       if (stream.turn !== null && data?.turn === stream.turn) {
         for (const id of stream.requests) {
-          this.store.confirm(id, sessionId, 'completed'); confirmed = true;
+          const limited = data.reason?.kind === 'error' && ['QUOTA','RATE_LIMIT'].includes(data.reason.error?.code);
+          this.store.confirm(id, sessionId, 'completed', limited ? Date.now() + 300000 : 0); confirmed = true;
         }
       }
       stream.turn = null; stream.requests.clear();

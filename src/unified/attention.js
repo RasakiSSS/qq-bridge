@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
+import { EXPLICIT_END_RE } from '../v2-wait.js';
 import { fail, json } from './store.js';
 
 export const MAX_QUIET_MS = 12000;
@@ -51,6 +52,7 @@ export class UnifiedAttention {
           const preferences = JSON.parse(this.store.db.prepare('SELECT preferences FROM scenes WHERE account=? AND scene=?').get(account, target).preferences);
           this.store.db.prepare('UPDATE scenes SET preferences=? WHERE account=? AND scene=?')
             .run(json({ ...preferences, wakeConfig: payload }, 8192), account, target);
+          if (payload.mode === 'diving' && !payload.triggers?.anyMessage) this.observeBeforeSleep(account,target);
           const previous = this.store.db.prepare('SELECT due_at FROM wake_timers WHERE account=? AND scene=?').get(account, target);
           // Merely editing triggers must not re-arm an already delivered alarm.
           if (payload.infinite === false && previous?.due_at === Date.parse(payload.sleepUntil)) return;
@@ -65,10 +67,43 @@ export class UnifiedAttention {
       },
     };
   }
+  observeBeforeSleep(account, key, sendId) {
+    if (!key || key === 'qzone') return;
+    const settings = this.sleepBounds(key);
+    if (settings.preSleepWaitEnabled === false) return;
+    const latest = this.store.db.prepare("SELECT seq,at,payload FROM events WHERE account=? AND scene=? AND kind='message' ORDER BY seq DESC LIMIT 1").get(account,key);
+    if (!latest || EXPLICIT_END_RE.test(JSON.parse(latest.payload).text || '')) return;
+    const windowMs = Math.max(0, Number(settings.preSleepWaitMs) || 300000);
+    const until = (sendId ? this.now() : Math.min(this.now(),latest.at)) + windowMs;
+    if (until <= this.now()) return;
+    const db = this.store.db;
+    const previous = db.prepare("SELECT json_extract(preferences,'$.preSleep') AS record FROM scenes WHERE account=? AND scene=?").get(account,key);
+    const last = JSON.parse(previous?.record || 'null');
+    if (sendId ? last?.sendId === sendId : last && (last.through >= latest.seq || last.until > this.now())) return;
+    const state = { through:latest.seq, from:Math.floor(this.now()/1000)*1000, until, sendId:sendId || last?.sendId || null };
+    db.prepare("UPDATE scenes SET preferences=json_set(preferences,'$.preSleep',json(?)) WHERE account=? AND scene=?").run(json(state),account,key);
+  }
+  checkObservations(ctx) {
+    const db = this.store.db;
+    for (const row of db.prepare("SELECT scene,json_extract(preferences,'$.preSleep') AS record FROM scenes WHERE account=? AND json_extract(preferences,'$.preSleep.until')>0").all(ctx.account)) {
+      const state = JSON.parse(row.record);
+      const next = db.prepare("SELECT seq FROM events WHERE account=? AND scene=? AND kind='message' AND seq>? AND at>=? AND at<=? ORDER BY seq LIMIT 1").get(ctx.account,row.scene,state.through,state.from,state.until);
+      if (!next && this.now() < state.until && this.sleepBounds(row.scene).preSleepWaitEnabled !== false) continue;
+      this.store.transaction(() => {
+        if (next && this.sleepBounds(row.scene).preSleepWaitEnabled !== false) {
+          db.prepare('UPDATE events SET wake=1 WHERE seq=? AND unread=1 AND notified=0').run(next.seq);
+          state.through = next.seq;
+        }
+        state.until = 0;
+        db.prepare("UPDATE scenes SET preferences=json_set(preferences,'$.preSleep',json(?)) WHERE account=? AND scene=?").run(json(state),ctx.account,row.scene);
+      });
+    }
+  }
   materialize() {
     const ctx = this.scenes.context();
     // Retain overdue alarms through manual pause and peak-hidden scenes.
     try { this.scenes.active(ctx); } catch (e) { if (e.code === 'PAUSED') return; throw e; }
+    this.checkObservations(ctx);
     const rows = this.store.db.prepare('SELECT * FROM wake_timers WHERE account=? AND event_seq IS NULL AND due_at<=? ORDER BY due_at').all(ctx.account, this.now());
     for (const row of rows) {
       if (!this.scenes.visible(row.scene, ctx) || this.isWakeAllowed({ scene: row.scene, kind: 'wake-timer' }, ctx) !== true) continue;
@@ -95,6 +130,8 @@ export class UnifiedAttention {
   }
   waitEvents(check = () => {}) {
     check(); this.checkTool('waitMessages'); this.materialize();
+    const current = this.scenes.current();
+    if (current) this.observeBeforeSleep(this.scenes.context().account,current.key);
     const pending = this.pending();
     const ctx = this.scenes.context();
     const since = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM events WHERE account=?').get(ctx.account).seq;

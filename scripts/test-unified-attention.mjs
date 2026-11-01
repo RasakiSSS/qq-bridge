@@ -183,3 +183,31 @@ test('space never receives a stand-alone finite model wake timer', async t => {
   await assert.rejects(f.set(cap.capability, { infinite: false, sleepMs: 1 }), { code: 'SCENE_DENIED' });
   assert.equal(f.timers().length, 0);
 });
+
+test('background pre-sleep observation wakes once for a new message without holding the main session or marking it read', async t => {
+  const f=fixture(t), key='group:1', cap=await f.scenes.join(key);
+  f.add(key,'first',{wake:false});
+  await f.set(cap.capability,{mode:'diving',infinite:true});
+  await f.call('qq_quit_session',{});
+  await f.scenes.join('private:200');
+  f.advance(299000);
+  f.add(key,'follow-up',{wake:false}); f.attention.materialize();
+  assert.equal(f.events().at(-1).wake,1);
+  assert.equal(f.events().at(-1).unread,1);
+  assert.equal(f.scenes.current().key,'private:200');
+  f.add(key,'another',{wake:false}); f.attention.materialize();
+  assert.equal(f.events().at(-1).wake,0);
+  f.attention.observeBeforeSleep('100',key,'next-send');
+  f.advance(300001); f.add(key,'late',{wake:false}); f.attention.materialize();
+  assert.equal(f.events().at(-1).wake,0);
+});
+test('explicit goodbye and disabled observation preserve diving triggers',async t=>{
+  for(const disabled of [false,true]){
+    const f=fixture(t),key='private:200',cap=await f.scenes.join(key);
+    f.attention.sleepBounds=()=>({preSleepWaitEnabled:!disabled});
+    f.add(key,disabled?'hello':'晚安',{wake:false});
+    await f.set(cap.capability,{mode:'diving'});
+    f.add(key,'later',{wake:false}); f.attention.materialize();
+    assert.equal(f.events().at(-1).wake,0);
+  }
+});
