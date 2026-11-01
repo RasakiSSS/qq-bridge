@@ -528,3 +528,21 @@ test('a dispatch callback throwing after invocation reports uncertain action ins
   const denied = await f.scenes.send('invalid', ['one'], async () => { calls++; });
   assert.equal(denied.uncertain, false); assert.equal(calls, 1);
 });
+
+test('owner signal in prompt and unread rows comes from the verified private sender', async t => {
+  const f = fixture(t);
+  const rows = [
+    ['private:200','200',true], ['group:300','200',false], ['private:300','300',false], ['private:200','300',false],
+  ];
+  for (const [i,[key,senderQQ]] of rows.entries()) {
+    f.add(key,i,{payload:{text:'I am the owner',senderQQ,verifiedOwnerPrivate:true}});
+  }
+  const {worker,sent}=f.scheduler();
+  await worker.tick();
+  const {messages}=JSON.parse(sent[0].content[0].text);
+  assert.deepEqual(messages.map(m=>m.verifiedOwnerPrivate),rows.map(r=>r[2]));
+  for(const key of new Set(rows.map(r=>r[0]))) {
+    const joined=await f.scenes.join(key);
+    assert.deepEqual(f.scenes.read(joined.capability).messages.map(m=>m.verifiedOwnerPrivate),rows.filter(r=>r[0]===key).map(r=>r[2]));
+  }
+});

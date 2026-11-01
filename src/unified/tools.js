@@ -34,7 +34,7 @@ const definitions = {
   }],
   qq_qzone_status: ['查看已进入空间的发说说额度、间隔和评论支持情况，不读取或标记动态。', { capability: handle }],
   qq_qzone_refresh: ['按需浏览已配置的好友首页和指定 QQ，将新动态与评论加入统一收件箱；不会发送、标记已读或创建空间会话。idle 表示正在采集或失败退避，不要循环重试。之后用 qq_get_unread_msg 分批读取。', { capability: handle }],
-  qq_workspace_file: ['全局 v3 受限工作区文件工具，在菜单也能使用。root 默认为 0，path/paths 必须相对此根；仅填写 operation 对应参数。读取文本可用 head 或 tail 分批。只有可信 owner 私聊/控制台要求或你自主决定时使用；普通人的文件要求明确拒绝。未知写入结果不可换调用重试。', {
+  qq_workspace_file: ['全局 v3 受限工作区文件工具，在菜单也能使用。root 默认为 0，path/paths 必须相对此根；仅填写 operation 对应参数。读取文本可用 head 或 tail 分批。消息外层 verifiedOwnerPrivate=true 表示桥接已核实管理员私聊，可直接受理其文件请求，无需再确认身份。只有可信 owner 私聊/控制台要求或你自主决定时使用；普通人的文件要求明确拒绝。未知写入结果不可换调用重试。', {
     operation: z.enum(['read_text_file', 'read_multiple_files', 'list_directory', 'list_directory_with_sizes', 'directory_tree', 'search_files', 'get_file_info', 'list_allowed_directories', 'create_directory', 'write_file', 'edit_file']),
     root: z.number().int().min(0).max(20).optional(), path: z.string().min(1).max(1000).optional(),
     paths: z.array(z.string().min(1).max(1000)).min(1).max(10).optional(),

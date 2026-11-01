@@ -158,12 +158,20 @@ export class UnifiedScenes {
       hasMore: rows.length > limit,
     }));
   }
+  verifiedOwnerPrivate(event, payload, ctx) {
+    return event.kind === 'message' && !!ctx.ownerQQ && event.scene === 'private:' + ctx.ownerQQ
+      && payload?.senderQQ === ctx.ownerQQ && payload.originalUnavailable !== true;
+  }
   read(capability, limit = 30) {
     const cap = this.authorize(capability); batchSize(limit);
     return this.store.transaction(() => {
       const events = this.store.unread(cap.account, cap.key, limit);
       const incomplete = events.filter(e => JSON.parse(e.payload).originalUnavailable === true);
-      return { key: cap.key, messages: events.map((e) => ({ seq: e.seq, payload: JSON.parse(e.payload) })),
+      const ctx = this.context();
+      return { key: cap.key, messages: events.map(e => {
+        const payload = JSON.parse(e.payload);
+        return { seq: e.seq, verifiedOwnerPrivate: this.verifiedOwnerPrivate(e, payload, ctx), payload };
+      }),
         remaining: this.store.counts(cap.account).find((x) => x.scene === cap.key).unread - events.length,
         receipt: this.store.receipt(cap.account, cap.key, 'read', events.filter(e => !incomplete.includes(e)), this.now()),
         ...(incomplete.length ? { incompleteSeqs: incomplete.map(e => e.seq),

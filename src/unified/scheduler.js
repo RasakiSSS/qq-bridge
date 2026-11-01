@@ -67,6 +67,7 @@ export class UnifiedScheduler {
           const payload = JSON.parse(event.payload);
           const raw = typeof payload?.text === 'string' ? payload.text : '';
           return { seq: event.seq, key: event.scene, kind: event.kind,
+            verifiedOwnerPrivate: this.scenes.verifiedOwnerPrivate(event, payload, ctx),
             text: raw.slice(0, 400), partial: raw.length > 400 || Object.keys(payload || {}).some((key) => key !== 'text') };
         });
         // Byte budget, including JSON escaping and multibyte text. Shrink only
