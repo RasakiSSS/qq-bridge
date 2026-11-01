@@ -94,7 +94,7 @@ const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 const RELATIONSHIPS_FILE = path.join(STATE_DIR, 'relationships.json');
 let closeUnifiedOnShutdown = null;
-const captureArg = process.argv?.slice(2).find(arg => /^--migration-(?:(receive|snapshot)-only|install-staged|activate-installed)/.test(arg));
+const captureArg = process.argv?.slice(2).find(arg => /^--migration-(?:(receive|snapshot)-only|install-staged|activate-installed|install-and-activate)/.test(arg));
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1423,9 +1423,10 @@ let stateDirHardened = null;
 async function main() {
   const cfg = loadConfig();
   if (captureArg !== undefined) {
-    const expected = /^--migration-(?:(?:receive|snapshot)-only|install-staged|activate-installed)=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
-    const installStaged = captureArg.startsWith('--migration-install-staged=');
-    const activate = captureArg.startsWith('--migration-activate-installed=');
+    const expected = /^--migration-(?:(?:receive|snapshot)-only|install-staged|activate-installed|install-and-activate)=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
+    const combined = captureArg.startsWith('--migration-install-and-activate=');
+    const installStaged = combined || captureArg.startsWith('--migration-install-staged=');
+    const activate = combined || captureArg.startsWith('--migration-activate-installed=');
     const snapshotOnly = activate || installStaged || captureArg.startsWith('--migration-snapshot-only=');
     if ((activate || installStaged) && cfg.socialV2?.unified?.enabled===true) throw new Error('暂存安装时必须保持统一调度关闭');
     if (!expected || readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode !== 'reserved2') throw new Error('维护收件须指定账号和已有二代模式');
@@ -1480,7 +1481,7 @@ async function main() {
         log('[migration] 已生成并核验私有快照及隔离候选账本：' + path.basename(result.directory) + '；保持只收件');
         return {snapshotId:result.snapshotId,directory:result.directory,candidate,installed};
       })();
-      void snapshot.catch(()=>log('[migration] 快照未通过验收；保持只收件，未启动统一模式'));
+      void snapshot.catch(error=>log('[migration] 快照未通过验收；保持只收件，未启动统一模式', /^[A-Z_]{2,80}$/.test(error?.code??'') ? error.code : 'MIGRATION_FAILED'));
     }
     closeUnifiedOnShutdown = async () => {
       try {maintenanceStop.abort(); await receiver.close(); if (snapshot) await snapshot.catch(()=>{}); registration?.journal.close();}

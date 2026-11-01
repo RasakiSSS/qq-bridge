@@ -91,11 +91,18 @@ export async function assertInstallationDshIdle(api) {
         || value.items.some(r => typeof r?.sessionId !== 'string' || !r.sessionId || r.running !== false)) throw fail('LEGACY_PREFLIGHT_UNAVAILABLE');
     const ids = value.items.map(r=>r.sessionId).sort();
     if (new Set(ids).size!==ids.length) throw fail('LEGACY_PREFLIGHT_UNAVAILABLE');
-    return {answer,ids};
+        const archived=value.items.filter(row=>row.formatStatus==='migration-required' && row.agentAvailable===false).map(row=>row.sessionId).sort();
+    return {answer,ids,archived};
   };
   const first = await read();
-  await assertLegacySessionsIdle({sessions:{list:async()=>first.answer},callUnary:(...args)=>api.callUnary(...args)},first.ids);
-  if (JSON.stringify(first.ids)!==JSON.stringify((await read()).ids)) throw fail('LEGACY_SESSION_BUSY');
+  const archived=new Set(first.archived);
+  for(const sessionId of archived){
+    const projection=await api.callUnary('session/projections',{sessionId});
+    if(projection?.result?.ok!==true||projection.result.value?.kind!=='migration-required')throw fail('LEGACY_PREFLIGHT_UNAVAILABLE');
+  }
+  await assertLegacySessionsIdle({sessions:{list:async()=>first.answer},callUnary:(...args)=>api.callUnary(...args)},first.ids.filter(id=>!archived.has(id)));
+  const last=await read();
+  if (JSON.stringify(first.ids)!==JSON.stringify(last.ids)||JSON.stringify(first.archived)!==JSON.stringify(last.archived)) throw fail('LEGACY_SESSION_BUSY');
   return true;
 }
 

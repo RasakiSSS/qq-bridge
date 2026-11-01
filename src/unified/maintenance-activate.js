@@ -27,7 +27,10 @@ export async function activateMaintenance({root,handle,candidate,registration,re
     const doc=JSON.parse(fs.readFileSync(evidence,'utf8'));
     if(doc.account!==identity.account||doc.snapshot!==handle.snapshotId||doc.generation!==generation)return false;
     const report=readCaptureStatus(raw,identity.account);
-    return doc.version===1&&doc.result==='reconciled-all-admitted-inbound'&&typeof doc.evidenceReference==='string'&&
+    const acceptedGap=doc.result==='recovered-available-operator-accepted-gaps'&&
+      doc.operatorDecision==='retain-recoverable-and-proceed'&&Array.isArray(doc.unverifiedScopes)&&doc.unverifiedScopes.length>0&&
+      doc.unverifiedScopes.every(s=>typeof s==='string'&&s.trim().length>0)&&Number.isSafeInteger(doc.recoveredMessages)&&doc.recoveredMessages>=0;
+    return doc.version===1&&(doc.result==='reconciled-all-admitted-inbound'||acceptedGap)&&typeof doc.evidenceReference==='string'&&
       doc.evidenceReference.trim().length>0&&report.lastWindow?.verified!=null&&report.lastWindow.closed===null&&
       report.lastWindow.failed===null&&!report.counts.unverified&&!report.counts.uncertainCommands&&
       Number.isSafeInteger(doc.checkedThrough)&&doc.checkedThrough>=report.lastWindow.verified&&doc.checkedThrough<=Date.now();

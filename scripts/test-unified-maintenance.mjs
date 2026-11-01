@@ -1,7 +1,7 @@
 import {activateMaintenance} from '../src/unified/maintenance-activate.js';
 import {createRawInbox} from '../src/unified/raw-inbox.js';
 import {DatabaseSync} from 'node:sqlite';
-import {assertMigrationStartup} from '../src/unified/bridge-driver.js';
+import {assertInstallationDshIdle,assertMigrationStartup} from '../src/unified/bridge-driver.js';
 import {UnifiedStore} from '../src/unified/store.js';
 import {MigrationStage} from '../src/unified/migration-stage.js';
 
@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import {pinOwnerSources,prepareCaptureJournal,captureBoundMigration} from '../src/unified/migration-maintenance.js';
 import {prepareMigrationCandidate} from '../src/unified/migration-candidate.js';
 
-for(const recover of [true,false]) test(recover?'maintenance resumes a target commit after interruption':'maintenance activates with matching operator reconciliation and drains a queued event',async t=>{
+for(const mode of ['recover','reconciled','accepted-gap']) test(mode==='recover'?'maintenance resumes a target commit after interruption':'maintenance activates with matching operator reconciliation and drains a queued event ('+mode+')',async t=>{
+  const recover=mode==='recover';
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-maint-')), privateRoot=path.join(root,'state','migration-snapshots');
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   fs.mkdirSync(path.join(root,'state/probes'),{recursive:true});fs.mkdirSync(privateRoot);
@@ -83,7 +84,7 @@ for(const recover of [true,false]) test(recover?'maintenance resumes a target co
           if(recover)assert.throws(startup,{code:'MIGRATION_STARTUP_UNVERIFIED'});
           else {
             host.announce=({evidence,snapshot,generation})=>fs.writeFileSync(evidence,JSON.stringify({version:1,account,snapshot,generation,
-              result:'reconciled-all-admitted-inbound',checkedThrough:Date.now(),evidenceReference:'fixture-upstream-ledger'}));
+              result:mode==='accepted-gap'?'recovered-available-operator-accepted-gaps':'reconciled-all-admitted-inbound',operatorDecision:'retain-recoverable-and-proceed',unverifiedScopes:['offline requests'],recoveredMessages:0,checkedThrough:Date.now(),evidenceReference:'fixture-upstream-ledger'}));
             journal.append(current,message('during-reconciliation'));
           }
           assert.equal((await activateMaintenance(host)).ingressThrough,recover?1:2);
@@ -104,4 +105,15 @@ for(const recover of [true,false]) test(recover?'maintenance resumes a target co
     } finally{reg.journal.close();}
   }
   assert.equal(fs.readdirSync(privateRoot).filter(p=>p.startsWith('snapshot-')).length,1);
+});
+
+test('idle scan requires an unavailable archive to remain incompatible across the scan',async()=>{
+  const ok=value=>({result:{ok:true,value}});
+  const item={sessionId:'archive',running:false,agentAvailable:false,formatStatus:'migration-required'};
+  const api={sessions:{list:async()=>ok({items:[item]})},callUnary:async()=>ok({kind:'migration-required'})};
+  assert.equal(await assertInstallationDshIdle(api),true);
+  api.callUnary=async()=>ok({kind:'cached'});
+  await assert.rejects(assertInstallationDshIdle(api),{code:'LEGACY_PREFLIGHT_UNAVAILABLE'});
+  api.callUnary=async()=>{item.agentAvailable=true;return ok({kind:'migration-required'})};
+  await assert.rejects(assertInstallationDshIdle(api),{code:'LEGACY_SESSION_BUSY'});
 });
