@@ -1,4 +1,4 @@
-import { snapshotIdentity } from './migration-snapshot.js';
+import { snapshotIdentity, snapshotJson } from './migration-snapshot.js';
 import { importMigrationDeltas } from './migration-delta.js';
 import { fail } from './store.js';
 import { projectLegacyQzone } from './migration-qzone.js';
@@ -37,6 +37,10 @@ export function activateStagedMigration({ store, stage, journal, handle, lease, 
       || store.db.prepare("SELECT 1 FROM summary_jobs WHERE account=? AND phase IN ('preparing','dispatching','accepted','unknown')").get(account)) throw fail('MIGRATION_NOT_QUIESCED');
   };
   idle();
+  const legacySpace = snapshotJson(handle, 'qzone.json')?.accounts?.[account];
+  if (legacySpace?.writes?.some(write => !['sent', 'not-sent'].includes(write?.status))) {
+    throw fail('MIGRATION_ACTION_UNRESOLVED');
+  }
   const delta = stage.exportDeltas(account);
   if (delta.actions.some(row => row.status === 'unknown')) throw fail('MIGRATION_ACTION_UNRESOLVED');
   importMigrationDeltas({ store, stage, account, assertExclusive: () => { check(); return true; } });

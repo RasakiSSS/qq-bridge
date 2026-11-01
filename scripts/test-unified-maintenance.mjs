@@ -1,4 +1,8 @@
 import {DatabaseSync} from 'node:sqlite';
+import {UnifiedStore} from '../src/unified/store.js';
+import {MigrationStage} from '../src/unified/migration-stage.js';
+import {activateStagedMigration} from '../src/unified/migration-activate.js';
+import {persistUnifiedIngress} from '../src/unified/migration-live-ingress.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,6 +52,22 @@ test('maintenance restart reopens the same bound snapshot and paused candidate w
         assert.equal((await installPausedCandidate(install)).operational,false);
         assert.equal(fs.statSync(target).nlink,1);
         assert.equal((await installPausedCandidate(install)).phase,'staged');
+        const store=new UnifiedStore(target);
+        const stage=new MigrationStage({file:path.join(candidate.directory,'stage.sqlite'),verifyPrivate:opts.verifyPrivate});
+        try {
+          const current=reg.identity, journal=reg.journal;
+          const lease={assert:()=>({...current,quiesced:true})};
+          const activate=()=>activateStagedMigration({journal,store,stage,handle:snap.handle,lease});
+          const message=id=>({account,scene:'group:1',sourceId:id,kind:'message',at:1000,payload:{text:id,media:[]}});
+          journal.append(current,message('before-cutover'));
+          assert.throws(activate,{code:'MIGRATION_INGRESS_PENDING'});
+          journal.transfer(current,stage);
+          assert.equal(activate().paused,true);
+          const live={journal,store,current,wakeAllowed:()=>true};
+          persistUnifiedIngress(live,message('after-cutover'));
+          assert.equal(persistUnifiedIngress(live,message('after-cutover')).receipt.duplicate,true);
+          assert.deepEqual(store.db.prepare('SELECT source_id FROM events WHERE unread=1 ORDER BY seq').all().map(r=>r.source_id),['before-cutover','after-cutover']);
+        } finally {stage.close();store.close();}
         write('config.json',{externalChange:true});
         await assert.rejects(captureBoundMigration(args),{code:'MIGRATION_SOURCE_CHANGED'});
       }

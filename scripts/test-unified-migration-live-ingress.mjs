@@ -194,3 +194,19 @@ test('unsequenced legacy outgoing previews survive candidate staging in order wi
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM actions').get().n,0);
 });
+
+test('cutover requires a known outcome for every historical space write', async t => {
+  for (const status of ['pending', 'uncertain', 'unrecognized', 'sent', 'not-sent']) {
+    await t.test(status, async t => {
+      const data = { ownPosts: [], pendingFeeds: [], seenFeeds: [], comments: {}, writes: [{ kind: 'post', status }] };
+      const f = await fixture(t, { qzone: { version: 1, accounts: { '100': data } } });
+      if (status === 'sent' || status === 'not-sent') {
+        assert.equal(f.activate().phase, 'ready');
+      } else {
+        assert.throws(() => f.activate(), { code: 'MIGRATION_ACTION_UNRESOLVED' });
+        assert.equal(f.store.db.prepare('SELECT phase FROM migration_imports').get().phase, 'staged');
+        assert.equal(f.store.db.prepare("SELECT count(*) AS n FROM migration_preserved WHERE category='cutover'").get().n, 0);
+      }
+    });
+  }
+});

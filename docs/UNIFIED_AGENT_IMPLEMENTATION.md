@@ -543,3 +543,9 @@ raw 库服务统一模式正常运行，不是带来源证明的迁移 journal�
 新增 --migration-install-staged=<账号>，仅用于已有归属登记、旧模型停稳且 unified.enabled 关闭的显式维护窗口。本次开发从未用此参数启动生产。与 snapshot-only 相同，在同一进程持有严格 PID 锁和旧桥接识别的内核回环端口，端口不提供控制台 API。重开时按已绑定 snapshotId 唯一定位快照，复查整套旧文件和当前 SQLite 一致性备份；内容改变、重复或找不到时拒绝续用。安装前从已鉴权的快照重新推导完整账本结构和每行内容；不能从被篡改的候选发布。以不覆盖的方式发布 state/unified.sqlite，仅 staged 且暂停，绝不自动 ready。收件日志同时记录安装凭证，支持发布期间进程中断后续作，不覆盖非本流程创建的目标。实际运行前需要单独维护授权；不要在自动任务里执行这些生产参数。
 
 维护接收器记载连接窗口、失败和未核验登录。只读工具 node scripts/unified-migration-status.mjs 返回源文件指纹是否仍匹配、历史映射及收件统计，不显示账号和正文。historyCoverage=unverified 是事实，单纯重新连接不足以证明没有漏收。当前本机只读检查无格式阻塞，无生产新收件库。完整相关 404 项通过，日志 state/probes/maintenance-install-full-tests.log。后续优先安装后激活/恢复的最后协调，处理未确认连接、未定管理命令、旧外部动作及过量旧收件的退回，不得手动 SQL 放行。
+
+### Installed cutover rehearsal and unresolved historical operations
+
+The isolated maintenance rehearsal now opens the published ledger, catches a pre-cutover arrival, refuses activation until transfer, and accepts a new live arrival exactly once. The imported manual pause survives. Activation checks the authenticated original space snapshot for unresolved writes before importing deltas. Only sent and explicitly not-sent outcomes are settled. Full related suite passed 410 tests. No production cutover was performed.
+
+Next connect the installed publication receipt to activation with durable crash recovery. Check physical identity before opening the target and validate the cutover receipt on resume. A live authenticated connection alone cannot attest to coverage during disconnection.
