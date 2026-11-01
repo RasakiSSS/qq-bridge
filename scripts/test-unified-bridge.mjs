@@ -15,7 +15,7 @@ async function fixture(t, options = {}, globals = {}) {
   const sessionPresets = new Map();
   const h = await bridgeHarness({ config: { socialV2: { unified: { enabled: true, workspaceId: 'fixture-workspace' }, sharedMemory: { enabled: false }, ...options } },
     files: { 'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml': '[]' },
-    globals: { startUnifiedHost: input => startUnifiedHost({ ...input,
+    globals: { isHardened: () => true, hardenFile: () => ({ ok: true }), startUnifiedHost: input => startUnifiedHost({ ...input,
       bindingOptions: { verify: () => true, harden: () => ({ ok: true }) },
       runtimeOptions: { ...input.runtimeOptions, readWorkspaces: async () => ({ items: [{ workspaceId: 'fixture-workspace', sessionIds: [...sessionPresets.keys()] }], archivedSessionIds: [] }) },
     }), ...globals },
@@ -70,7 +70,7 @@ test('real bridge captures account-bound requests and global relationship action
     return { status: 'ok', retcode: 0, data: action === 'get_login_info' ? { user_id: 100 } : {} };
   };
   await h.receive(); await h.unifiedDriver.tick();
-  const event = { self_id: 100, post_type: 'request', request_type: 'friend', user_id: 201, flag: 'fixture-flag', comment: 'hello' };
+  const event = { self_id: 100, post_type: 'request', request_type: 'friend', user_id: 201, flag: 'fixture-flag', comment: 'hello', time: 1000 };
   await h.bot.emitRequest('friend', event);
   await h.bot.emitRequest('friend', event);
   await h.bot.emitRequest('friend', { ...event, self_id: 999, flag: 'other-account' });

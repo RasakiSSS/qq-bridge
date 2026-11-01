@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRawInbox } from '../src/unified/raw-inbox.js';
+
+test('restart recovers original QQ event and never repeats an uncertain owner command', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-raw-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'raw.sqlite'), seen = [];
+  const options = { file, verifyPrivate: () => true, hardenFile: () => ({ ok: true }), assertAccess() {}, allowed: () => true };
+  const incoming = (n, id, message) => ({ post_type: 'message', message_type: 'private', self_id: 100, user_id: n, time: 1000, message_id: id, message });
+  const cmd = incoming(123, 1, '/reset'), msg = incoming(124, 1, [{ type: 'image', data: { file: 'fixture' } }]);
+  const first = createRawInbox({ ...options, deliver: async (_key, _kind, e) => { seen.push(e.message); throw Error('interrupted'); } });
+  first.capture('private:123', cmd);
+  first.capture('private:124', msg);
+  await assert.rejects(first.drain('100'), /interrupted/);
+  assert.deepEqual(seen, [cmd.message, msg.message]);
+  const recovered = createRawInbox({ ...options, deliver: async (_key, _kind, e) => { seen.push(e); } });
+  recovered.capture('private:123', cmd);
+  recovered.capture('private:124', msg);
+  await recovered.drain('101');
+  assert.equal(seen.length, 2);
+  await recovered.drain('100');
+  await recovered.drain('100');
+  assert.deepEqual(seen.slice(2), [msg]);
+  assert.throws(() => recovered.capture('private:124', { ...msg, message: 'conflicting content' }), /RAW_EVENT_CONFLICT/);
+  assert.throws(() => recovered.capture('private:124', { ...msg, time: undefined }), /INVALID_RAW_EVENT/);
+});

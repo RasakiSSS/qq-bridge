@@ -29,6 +29,7 @@ import * as memoryQzone from '../src/shared-memory-qzone.js';
 import * as memoryWorker from '../src/shared-memory-worker.js';
 import * as relationshipControl from '../src/relationship-control.js';
 import * as nativeFriends from '../src/native-friend-client.js';
+import { createRawInbox } from '../src/unified/raw-inbox.js';
 import * as unifiedHost from '../src/unified/host.js';
 import * as unifiedDriver from '../src/unified/bridge-driver.js';
 import * as unifiedSend from '../src/unified/bridge-send.js';
@@ -197,7 +198,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
-    ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
+    createRawInbox, ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

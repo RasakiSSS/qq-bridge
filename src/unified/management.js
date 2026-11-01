@@ -8,6 +8,15 @@ const levels = {
   v3: '聊天、空间、记忆、总结、好友关系及受限工作区文件操作',
 };
 
+export function managementCommandText(event) {
+    let text;
+    if (typeof event?.message === 'string' && !event.message.includes('[CQ:')) text = event.message;
+    else if (Array.isArray(event?.message) && event.message.length > 0 && event.message.every(p => p?.type === 'text' && typeof p.data?.text === 'string')) {
+      text = event.message.map(p => p.data.text).join('');
+    }
+    return typeof text === 'string' && text.trim().startsWith('/') ? text : null;
+}
+
 // Separate HOST ingress, never part of the model's MCP tool surface. Authenticators
 // must verify the OneBot connection/console request; payload fields are not proof.
 export class UnifiedManagement {
@@ -37,12 +46,8 @@ export class UnifiedManagement {
   async fromQQ(connection, event) {
     // Only an original text-only message is a management command. Forwarded,
     // quoted and model-produced content is never extracted and reinterpreted.
-    let text;
-    if (typeof event?.message === 'string' && !event.message.includes('[CQ:')) text = event.message;
-    else if (Array.isArray(event?.message) && event.message.length > 0 && event.message.every(p => p?.type === 'text' && typeof p.data?.text === 'string')) {
-      text = event.message.map(p => p.data.text).join('');
-    }
-    if (typeof text !== 'string' || !text.trim().startsWith('/')) return { handled: false };
+    const text = managementCommandText(event);
+    if (text === null) return { handled: false };
     const before = this.scenes.context();
     if (await this.authenticateQQ(connection, event) !== true) throw fail('UNAUTHORIZED');
     const ctx = this.#contextUnchanged(before);

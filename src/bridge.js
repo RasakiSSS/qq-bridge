@@ -1,3 +1,4 @@
+import { createRawInbox } from './unified/raw-inbox.js';
 // QQ ↔ DeepSeek Harness 桥接主程序。
 //
 // 链路：
@@ -25,7 +26,7 @@ import { compactModelMessage } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
-import { hardenDir, manualDirCommand } from './state-acl.mjs';
+import { hardenFile, isHardened, hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { CN_HOLIDAYS_2026, isPeakAt, resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
@@ -1418,7 +1419,7 @@ async function main() {
   const unifiedWorkspaceId = String(cfg.socialV2?.unified?.workspaceId || '').trim();
   if (unifiedConfigured && !unifiedWorkspaceId) throw new Error('统一模式需要显式配置现有 workspaceId；不会自动迁移或新建工作区');
   let unifiedDriver = null;
-  let unifiedLoginPending = null;
+  let unifiedLoginPending = null, rawInbox;
   const unifiedConsoleRequests = new WeakSet();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
@@ -11228,7 +11229,10 @@ async function main() {
       return;
     }
     if (unifiedConfigured) {
-      await handleUnifiedIncoming(key, kind, event);
+      if (!snowlumaHealth.connected || (!unifiedLoginPending && String(event.self_id) !== selfUserId)) return;
+      rawInbox.capture(key, event);
+      if (unifiedLoginPending) await unifiedLoginPending;
+      await rawInbox.drain(selfUserId);
       return;
     }
     // 在任何异步名字/引用解析之前记录，A 群入站后 B 群可立即检索。
@@ -12283,7 +12287,7 @@ async function main() {
   }
   async function handleUnifiedIncoming(key, kind, event) {
     if (unifiedLoginPending) await unifiedLoginPending;
-    if (!unifiedDriver || !selfUserId || String(event.self_id) !== selfUserId || !snowlumaHealth.connected) return;
+    if (!unifiedDriver || !selfUserId || String(event.self_id) !== selfUserId || !snowlumaHealth.connected) throw new Error('QQ identity unavailable');
     const management = await unifiedDriver.fromQQ(bot, event);
     if (management.handled) {
       if (management.response) await sendToQQ(key, management.response);
@@ -12331,7 +12335,14 @@ async function main() {
       resolveReply: resolveReplyTargetV2, send: sendMessagesV2, record: recordSentMessagesV2,
       computeDelays: (messages, config) => computeGapsV2(messages, 'auto', undefined, [], config),
     });
+    const rawFile = path.join(STATE_DIR, 'unified-raw.sqlite');
+    rawInbox = createRawInbox({ file: rawFile, verifyPrivate: isHardened, hardenFile,
+      deliver: (key, kind, event) => key === 'friend-requests' ? unifiedDriver.friendRequest(event) : handleUnifiedIncoming(key, kind, event),
+      assertAccess: () => { assertUnifiedInstallation(); if (!unifiedBindingExcluded(rawFile)) throw new Error('unsafe raw inbox'); },
+      allowed: (account, key) => account === selfUserId && !unifiedLoginPending && snowlumaHealth.connected && (key === 'friend-requests' ? relationshipEnabled() : isSessionAllowedInCurrentMode(key)),
+    });
     unifiedDriver = createUnifiedBridgeDriver({ log,
+      replayPersisted: () => rawInbox.drain(selfUserId),
       ready: () => !!selfUserId && unifiedContext().enabled && !socialV2.paused,
       createHost: () => {
         if (!selfUserId) throw new Error('机器人身份尚未验证');
@@ -12402,6 +12413,7 @@ async function main() {
     });
     closeUnifiedOnShutdown = async () => {
       unifiedQzoneClosing = true;
+      await Promise.resolve(rawInbox.close()).catch(() => log('[unified] 关闭时仍有待处理的入站记录'));
       const drained = await Promise.allSettled([unifiedDriver.close(), unifiedQzonePoll]);
       if (drained[0].status === 'rejected') throw drained[0].reason;
     };
@@ -12435,8 +12447,10 @@ async function main() {
     bot.onRequest('friend', (event) => {
       if (!relationshipEnabled()) return;
       if (unifiedConfigured) {
-        if (!selfUserId || unifiedLoginPending || !snowlumaHealth.connected || String(event?.self_id) !== selfUserId) return;
-        return unifiedDriver.friendRequest(event).catch(() => log('[unified] 好友申请保存失败，未执行关系操作'));
+        if (!snowlumaHealth.connected || (!unifiedLoginPending && String(event?.self_id) !== selfUserId)) return;
+        try { rawInbox.captureFriend(event); }
+        catch { log('[unified] 好友申请未通过持久收件校验，未执行关系操作'); return; }
+        return rawInbox.drain(selfUserId).catch(() => log('[unified] 好友申请仍待处理，未执行关系操作'));
       }
       const request = withRelationships(() => relationshipStore.recordRequest(event), null);
       if (!request) return;
