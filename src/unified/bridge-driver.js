@@ -81,6 +81,24 @@ export async function assertLegacySessionsIdle(api, ids) {
 }
 
 
+// Maintenance has no reliable legacy index of every background model worker.
+// Inspect the complete list and reject a changed session set during the scan.
+export async function assertInstallationDshIdle(api) {
+  const read = async () => {
+    const answer = await api.sessions.list({});
+    const value = answer?.result?.value;
+    if (answer?.result?.ok !== true || !Array.isArray(value?.items) || value.hasMore || value.nextCursor
+        || value.items.some(r => typeof r?.sessionId !== 'string' || !r.sessionId || r.running !== false)) throw fail('LEGACY_PREFLIGHT_UNAVAILABLE');
+    const ids = value.items.map(r=>r.sessionId).sort();
+    if (new Set(ids).size!==ids.length) throw fail('LEGACY_PREFLIGHT_UNAVAILABLE');
+    return {answer,ids};
+  };
+  const first = await read();
+  await assertLegacySessionsIdle({sessions:{list:async()=>first.answer},callUnary:(...args)=>api.callUnary(...args)},first.ids);
+  if (JSON.stringify(first.ids)!==JSON.stringify((await read()).ids)) throw fail('LEGACY_SESSION_BUSY');
+  return true;
+}
+
 // Read-only startup fence, before the bridge loads/saves old state. Disabling
 // unified configuration is not a rollback transaction and cannot revive legacy.
 export function assertMigrationStartup(file, unifiedConfigured, journalFile) {

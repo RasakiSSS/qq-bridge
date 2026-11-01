@@ -19,9 +19,17 @@ export function planLegacyQq({ account, snapshotAccount, snapshotId, social, ses
     if (key === 'qzone' || !record(source) || !Array.isArray(source.unread) || !Array.isArray(source.recentMessages)
         || !natural(source.lastUnreadSeq) || !natural(source.lastReadThroughSeq)
         || source.lastReadThroughSeq > source.lastUnreadSeq) throw fail('MIGRATION_INVALID_SOURCE');
-    const bySeq = new Map(), unread = new Set();
+    const bySeq = new Map(), unread = new Set(), sentHistory = [];
     for (const [list, pending] of [[source.recentMessages, false], [source.unread, true]]) {
-      for (const row of list) {
+      for (const [index,row] of list.entries()) {
+        // recordSentMessagesV2 never assigned an inbox sequence to the bot's
+        // own outgoing previews. Preserve their order, including identical
+        // messages, without manufacturing unread/receipt/wake/action records.
+        if (!pending && record(row) && row.isSelf === true && !Object.hasOwn(row,'seq')
+            && typeof row.text === 'string' && Number.isSafeInteger(row.time) && row.time > 0) {
+          sentHistory.push({ index, at:row.time, text:row.text, originalUnavailable:true });
+          continue;
+        }
         if (!record(row) || !natural(row.seq) || row.seq === 0 || row.seq > source.lastUnreadSeq
             || typeof row.text !== 'string' || !Number.isFinite(row.time)) throw fail('MIGRATION_INVALID_SOURCE');
         // Legacy persisted text is already a 200-character preview. Never label
@@ -65,7 +73,7 @@ export function planLegacyQq({ account, snapshotAccount, snapshotId, social, ses
       warnings.push({ key, reason: 'LOCAL_MEMORY_REQUIRES_EVIDENCE_MAPPING' });
     scenes.push({ key, legacySessionId: typeof sessions[key] === 'string' ? sessions[key] : null,
       legacyReadThroughSeq: source.lastReadThroughSeq, lastLegacySeq: source.lastUnreadSeq,
-      preferences, timer, events });
+      preferences, timer, events, sentHistory });
   }
   return { version: 1, account, snapshotId, dryRun: true, applicable: false,
     paused: social.paused === true, scenes, blockers, warnings,

@@ -21,7 +21,7 @@ export function captureAccount({ file, expected, verifyPrivate, excluded }) {
 }
 
 export async function startCaptureReceiver({ account, bot, inbox, allowed, relationships, status }) {
-  let epoch = 0, online = false, closed = false, hold;
+  let epoch = 0, online = false, closed = false, healthy = true, hold;
   const invalid = () => { online = false; hold = undefined; epoch++; };
   bot.on('open', () => {
     invalid();
@@ -43,11 +43,11 @@ export async function startCaptureReceiver({ account, bot, inbox, allowed, relat
       if (String(event.user_id) === account || String(event.sender?.user_id) === account) return;
       const peer = kind === 'private' ? event.user_id : event.group_id;
       if (allowed(kind, peer)) inbox.capture(kind + ':' + peer, event, online ? undefined : hold);
-    } catch { status('capture-failed'); }
+    } catch { healthy = false; status('capture-failed'); }
   }
   bot.onPrivateMessage(e => capture('private',e));
   bot.onGroupMessage(e => capture('group',e));
   bot.onRequest('friend', e => capture('friend',e));
   try { await bot.connect(); } catch { closed = true; bot.close(); throw fail('MIGRATION_RECEIVER_OFFLINE'); }
-  return { get verified() { return online && !closed; }, close() { closed = true; invalid(); bot.close(); return inbox.close(); } };
+  return { get generation() { return online ? hold : null; }, get healthy() { return healthy; }, get verified() { return online && !closed; }, close() { closed = true; invalid(); bot.close(); return inbox.close(); } };
 }

@@ -182,3 +182,15 @@ test('attested gateway text upgrades exactly one legacy preview and retains the 
   assert.equal(JSON.parse(f.store.db.prepare('SELECT payload FROM migration_sources').get().payload).at,1033);
   assert.equal(replayUnifiedIngress(f.options()).pending,0);
 });
+
+test('unsequenced legacy outgoing previews survive candidate staging in order without generating unread messages or actions', async t => {
+  const { cutoverFixture }=await import('./fixture-unified-cutover.mjs');
+  const old={sender:'self',isSelf:true,text:'same',plain:'same',time:1000};
+  const scene={unread:[],recentMessages:[old,{...old,time:2000}],lastUnreadSeq:0,lastReadThroughSeq:0,wakeConfig:{}};
+  const f=await cutoverFixture(t,{social:{paused:false,conversations:{'group:456':scene}}});
+  f.activate();
+  const context=JSON.parse(f.store.db.prepare("SELECT payload FROM migration_preserved WHERE category='scene:group:456'").get().payload);
+  assert.deepEqual(context.sentHistory.map(h=>[h.index,h.text,h.at]),[[0,'same',1000],[1,'same',2000]]);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM actions').get().n,0);
+});

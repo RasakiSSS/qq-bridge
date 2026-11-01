@@ -529,3 +529,38 @@ test('actual capture-only boot never loads corrupt legacy sessions, starts DSH o
   try { assert.equal(db.prepare('SELECT status FROM raw').get().status,'pending'); } finally { db.close(); }
   assert.equal(h.calls.prompts.length,0); assert.equal(h.calls.sent.length,0);
 });
+
+test('snapshot-only bridge pins only authenticated source bytes and keeps receiving without prompts', async t => {
+  const {pinOwnerSources,prepareCaptureJournal,boundOwnerProof} = await import('../src/unified/migration-maintenance.js');
+  const handlers = {}, sessions = {list:async()=>ok({items:[{sessionId:'memory-worker',running:false}]})};
+  let probes=0;
+  class CheckApi { constructor() {this.sessions=sessions;} callUnary() {probes++;return ok({kind:'sequenced',values:{inbox:{'next-step':[],'next-turn':[]}}});} }
+  class Bot {
+    on(k,fn){handlers[k]=fn;} onPrivateMessage(fn){handlers.private=fn;} onGroupMessage(fn){handlers.group=fn;} onRequest(k,fn){handlers[k]=fn;}
+    async getLoginInfo(){return {user_id:100};} async connect(){handlers.open();} close(){}
+  }
+  const statement = {version:1,account:'100',source:'operator-confirmation-in-current-chat',productionMigrationAuthorized:false,scope:['state/social-v2.json','state/sessions.json']};
+  const h=await bridgeHarness({args:['--migration-snapshot-only=100'],files:{'state/mode.json':{mode:'reserved2'},
+    'state/sessions.json':{sessions:{}},'state/social-v2.json':{paused:true,conversations:{}},
+    'state/probes/unified-legacy-owner-attestation.json':statement,'dsh/agent-presets/qq-chat-v2-files/agent.cordis.yml':'[]'},
+    globals:{SnowLumaWebSocketClient:Bot,NodeApiClient:CheckApi,verifyMaintenanceAcl:()=>true,hardenFile:()=>({ok:true}),
+      discoverSnowLumaConnection:async()=>({ok:true,self:{user_id:100}}),
+      prepareCaptureJournal:opts=>{pinOwnerSources({...opts,assertTrusted:()=>true});return prepareCaptureJournal(opts);}
+    }});
+  t.after(()=>h.close());
+  const result=await h.receiver.snapshot;
+  assert.equal(result.candidate.phase,'staged'); assert.equal(result.candidate.operational,false);
+  const stagedDb=new DatabaseSync(path.join(result.candidate.directory,'unified.sqlite'),{readOnly:true});
+  try {assert.equal(stagedDb.prepare('SELECT paused FROM accounts').get().paused,1);} finally {stagedDb.close();}
+  const manifest=JSON.parse(fs.readFileSync(path.join(result.directory,'manifest.json')));
+  assert.equal(manifest.snapshotId,result.snapshotId); assert.match(manifest.provenance,/^[a-f0-9]{64}$/);
+  assert.ok(probes>=2); assert.equal(h.calls.prompts.length,0);
+  const opts={root:h.temp,account:'100',verifyPrivate:()=>true,assertOwner(){}};
+  const proof=boundOwnerProof(opts); assert.equal(proof.provenance,manifest.provenance);
+  const files={'social-v2.json':Buffer.from('changed'),'sessions.json':Buffer.from('{"sessions":{}}')};
+  assert.throws(()=>proof.assertFiles(files),{code:'MIGRATION_SOURCE_CHANGED'});
+  fs.appendFileSync(path.join(h.temp,'state/sessions.json'),' ');
+  assert.throws(()=>proof.assert(),{code:'MIGRATION_SOURCE_CHANGED'});
+  assert.throws(()=>boundOwnerProof({...opts,account:'101'}),{code:'MIGRATION_ACCOUNT_UNVERIFIED'});
+  assert.equal(fs.existsSync(path.join(h.temp,'state/unified.sqlite')),false);
+});

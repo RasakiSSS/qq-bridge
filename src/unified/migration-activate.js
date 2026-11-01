@@ -75,6 +75,7 @@ export function activateStagedMigration({ store, stage, journal, handle, lease, 
     }
     for (const row of base.scenes) {
       const context = JSON.parse(row.payload);
+      if (store.db.prepare('SELECT payload FROM migration_preserved WHERE account=? AND category=?').get(account,'scene:'+row.scene)?.payload !== row.payload) throw fail('MIGRATION_CONFLICT');
       const preference = store.db.prepare('SELECT preferences FROM scenes WHERE account=? AND scene=?').get(account, row.scene);
       if (!preference || JSON.stringify(JSON.parse(preference.preferences).wakeConfig) !== JSON.stringify(context.preferences)) throw fail('MIGRATION_CONFLICT');
       if (context.timer) {

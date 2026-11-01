@@ -1,3 +1,6 @@
+import { prepareMigrationCandidate } from '../src/unified/migration-candidate.js';
+import { prepareCaptureJournal, captureBoundMigration } from '../src/unified/migration-maintenance.js';
+import { verifyMaintenanceAcl } from '../src/unified/maintenance-acl.js';
 import { captureAccount, startCaptureReceiver } from '../src/unified/capture-receiver.js';
 // Execute the real bridge initialization/functions against temporary files and fake peers.
 // No production config, QQ connection, DSH process, or persistent home is accessed.
@@ -199,7 +202,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
-    captureAccount, startCaptureReceiver, createRawInbox, ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
+    prepareMigrationCandidate, prepareCaptureJournal, captureBoundMigration, verifyMaintenanceAcl, captureAccount, startCaptureReceiver, createRawInbox, ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -228,7 +231,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   vm.runInContext(`Object.assign(globalThis, (() => { ${modelViewSource}\nreturn { compactModelMessage, compactModelData, serializeModelData }; })());`, context);
   vm.runInContext(source + '\nglobalThis.auditReady = main();', context);
   const bridge = await context.auditReady;
-  if (args.some(a => a.startsWith('--migration-receive-only'))) return { receiver: bridge, temp, calls,
+  if (args.some(a => /^--migration-(receive|snapshot)-only/.test(a))) return { receiver: bridge, temp, calls,
     async close() { await bridge.close(); fs.rmSync(temp, { recursive: true, force: true }); } };
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2', 'qq-chat-v2-files', 'qq-qzone', 'qq-memory']);
   bridge.setReady(true);

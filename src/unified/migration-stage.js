@@ -73,7 +73,7 @@ export class MigrationStage {
       for (const scene of plan.scenes) {
         const source = social.conversations[scene.key];
         // Keep non-operational local context and exact preferences; no agent token.
-        const context = { legacySessionId: scene.legacySessionId, preferences: scene.preferences, timer: scene.timer,
+        const context = { ...(scene.sentHistory.length ? { sentHistory:scene.sentHistory } : {}), legacySessionId: scene.legacySessionId, preferences: scene.preferences, timer: scene.timer,
           legacyReadThroughSeq: scene.legacyReadThroughSeq, lastLegacySeq: scene.lastLegacySeq,
           activeTopics: source.activeTopics ?? [], pendingThoughts: source.pendingThoughts ?? [], memberImpressions: source.memberImpressions ?? {} };
         this.db.prepare('INSERT INTO scenes VALUES(?,?,?)').run(handle.account, scene.key, json(context));

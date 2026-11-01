@@ -91,14 +91,17 @@ export async function captureMigrationSnapshot({ root, acquire, readFiles, memor
       const destination = path.join(directory, name);
       fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
       const fd = fs.openSync(destination, 'wx', 0o600);
-      try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      try { requirePrivate(verifyPrivate,destination); fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     }
     let memory = null;
     if (memoryFile !== null) {
       plainDirectory(path.dirname(memoryFile)); regular(memoryFile);
       const database = new DatabaseSync(memoryFile, { readOnly: true });
       const destination = path.join(directory, 'memory.sqlite');
-      try { await backup(database, destination); } finally { database.close(); }
+      try {
+        fs.closeSync(fs.openSync(destination,'wx',0o600)); requirePrivate(verifyPrivate,destination);
+        await backup(database, destination);
+      } finally { database.close(); }
       await check(); regular(destination);
       memory = { name: 'memory.sqlite', ...fileDigest(destination) };
     }
@@ -108,7 +111,7 @@ export async function captureMigrationSnapshot({ root, acquire, readFiles, memor
     if (!Number.isFinite(manifest.created)) throw fail('INVALID_CLOCK');
     const snapshotId = sha(encode(manifest));
     const fd = fs.openSync(path.join(directory, 'manifest.json'), 'wx', 0o600);
-    try { fs.writeFileSync(fd, encode({ ...manifest, snapshotId })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    try { requirePrivate(verifyPrivate,path.join(directory,'manifest.json')); fs.writeFileSync(fd, encode({ ...manifest, snapshotId })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     await check();
     return { directory, snapshotId, account: initial.account };
   } catch (error) {
@@ -126,6 +129,7 @@ export async function captureMigrationSnapshot({ root, acquire, readFiles, memor
 export function loadMigrationSnapshot({ directory, expectedAccount, verifyPrivate, attest }) {
   accountId(expectedAccount); plainDirectory(directory); requirePrivate(verifyPrivate, directory);
   const marker = path.join(directory, 'manifest.json');
+  requirePrivate(verifyPrivate,marker);
   if (regular(marker).size > 1024 * 1024) throw fail('MIGRATION_SNAPSHOT_TOO_LARGE');
   const { snapshotId, ...manifest } = JSON.parse(fs.readFileSync(marker, 'utf8'));
   if (manifest.version !== 1 || manifest.account !== expectedAccount || sha(encode(manifest)) !== snapshotId
@@ -134,7 +138,7 @@ export function loadMigrationSnapshot({ directory, expectedAccount, verifyPrivat
   const files = Object.create(null);
   let total = 0;
   const read = row => {
-    const file = path.join(directory, row.name); plainDirectory(path.dirname(file)); const stat = regular(file);
+    const file = path.join(directory, row.name); plainDirectory(path.dirname(file)); const stat = regular(file); requirePrivate(verifyPrivate,file);
     total += stat.size;
     if (total > 128 * 1024 * 1024) throw fail('MIGRATION_SNAPSHOT_TOO_LARGE');
     const bytes = fs.readFileSync(file);
@@ -148,7 +152,7 @@ export function loadMigrationSnapshot({ directory, expectedAccount, verifyPrivat
   fileSet(files);
   if (manifest.memory) {
     if (manifest.memory.name !== 'memory.sqlite') throw fail('MIGRATION_INVALID_SOURCE');
-    const file = path.join(directory, 'memory.sqlite'); regular(file);
+    const file = path.join(directory, 'memory.sqlite'); regular(file); requirePrivate(verifyPrivate,file);
     const digest = fileDigest(file);
     if (digest.bytes !== manifest.memory.bytes || digest.sha256 !== manifest.memory.sha256) throw fail('MIGRATION_SNAPSHOT_CORRUPT');
   }

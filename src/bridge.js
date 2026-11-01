@@ -1,3 +1,6 @@
+import { prepareMigrationCandidate } from './unified/migration-candidate.js';
+import { prepareCaptureJournal, captureBoundMigration } from './unified/migration-maintenance.js';
+import { verifyMaintenanceAcl } from './unified/maintenance-acl.js';
 import { captureAccount, startCaptureReceiver } from './unified/capture-receiver.js';
 import { createRawInbox } from './unified/raw-inbox.js';
 // QQ ↔ DeepSeek Harness 桥接主程序。
@@ -41,7 +44,7 @@ import { UnifiedNativeGrants } from './unified/relationships.js';
 import { workspaceServer } from './unified/files.js';
 import { nativeFriendRequest } from './native-friend-client.js';
 import { startUnifiedHost } from './unified/host.js';
-import { createUnifiedBridgeDriver, assertLegacySessionsIdle, assertMigrationStartup } from './unified/bridge-driver.js';
+import { createUnifiedBridgeDriver, assertLegacySessionsIdle, assertInstallationDshIdle, assertMigrationStartup } from './unified/bridge-driver.js';
 import { createBridgeSendHandler } from './unified/bridge-send.js';
 import {
   loadSlang,
@@ -88,7 +91,7 @@ const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 const RELATIONSHIPS_FILE = path.join(STATE_DIR, 'relationships.json');
 let closeUnifiedOnShutdown = null;
-const captureArg = process.argv?.slice(2).find(arg => arg.startsWith('--migration-receive-only'));
+const captureArg = process.argv?.slice(2).find(arg => /^--migration-(receive|snapshot)-only/.test(arg));
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1417,24 +1420,54 @@ let stateDirHardened = null;
 async function main() {
   const cfg = loadConfig();
   if (captureArg !== undefined) {
-    const expected = /^--migration-receive-only=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
+    const expected = /^--migration-(?:receive|snapshot)-only=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
+    const snapshotOnly = captureArg.startsWith('--migration-snapshot-only=');
     if (!expected || readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode !== 'reserved2') throw new Error('维护收件须指定账号和已有二代模式');
     acquireLock({ strict: true });
     const assertOwner = () => { if (Number(fs.readFileSync(LOCK_FILE, 'utf8')) !== process.pid) throw new Error('维护收件失去安装锁'); };
-    const account = captureAccount({ file: path.join(STATE_DIR, 'migration-ingress.sqlite'), expected,
+    const conn = await discoverSnowLumaConnection({ cfg });
+    if (!conn.ok || String(conn.self?.user_id) !== expected) throw new Error('维护收件未验证到目标网关账号');
+    const privateCheck = target => verifyMaintenanceAcl(target) && unifiedBindingExcluded(target);
+    const registration = snapshotOnly ? prepareCaptureJournal({ root: ROOT, account: expected, verifyPrivate: privateCheck,
+      excluded: unifiedBindingExcluded, assertOwner, hardenFile }) : null;
+    const account = registration ? registration.identity.account : captureAccount({ file: path.join(STATE_DIR, 'migration-ingress.sqlite'), expected,
       verifyPrivate: isHardened, excluded: unifiedBindingExcluded });
     const file = path.join(STATE_DIR, 'unified-raw.sqlite');
-    const inbox = createRawInbox({ file, verifyPrivate: isHardened, hardenFile,
+    const inbox = createRawInbox({ file, verifyPrivate: snapshotOnly ? privateCheck : isHardened, hardenFile,
       assertAccess: () => { assertOwner(); if (!unifiedBindingExcluded(file)) throw new Error('unsafe raw inbox'); } });
-    const conn = await discoverSnowLumaConnection({ cfg });
-    if (!conn.ok || String(conn.self?.user_id) !== account) throw new Error('维护收件未验证到目标网关账号');
     const bot = new SnowLumaWebSocketClient({ url: conn.wsUrl || cfg.snowluma.wsUrl,
       accessToken: conn.wsToken || cfg.snowluma.accessToken || undefined, reconnect: true });
-    let lastStatus;
+    let lastStatus, ready;
+    const firstVerified = new Promise(resolve => { ready = resolve; });
     const receiver = await startCaptureReceiver({ account, bot, inbox, allowed: (kind,id) => allowed(kind,id,cfg),
       relationships: relationshipConfig(cfg.socialV2?.relationships).enabled,
-      status: value => { if (value !== lastStatus) log('[migration] 只收件：' + value); lastStatus = value; } });
-    closeUnifiedOnShutdown = () => receiver.close();
+      status: value => { if (value === 'ready') ready(); if (value !== lastStatus) log('[migration] 只收件：' + value); lastStatus = value; } });
+    let snapshot;
+    if (registration) {
+      snapshot = (async () => {
+        let timer;
+        try { await Promise.race([firstVerified, new Promise((_,reject) => { timer=setTimeout(()=>reject(new Error('MIGRATION_RECEIVER_OFFLINE')),15000); })]); }
+        finally { clearTimeout(timer); }
+        const api = new NodeApiClient(cfg.dsh.baseUrl, undefined, { token:cfg.dsh.authToken,tokenExplicit:cfg.dsh.authTokenExplicit===true,
+          header:cfg.dsh.authHeader,prefix:cfg.dsh.authPrefix,allowRemote:cfg.dsh.allowRemote===true });
+        const privateRoot = path.join(STATE_DIR,'migration-snapshots');
+        if (!fs.existsSync(privateRoot)) fs.mkdirSync(privateRoot,{mode:0o700});
+        // Conservatively inspect every listed session, including memory workers
+        // which are not reliably present in legacy session index files.
+        const assertIdle = () => assertInstallationDshIdle(api);
+        const result = await captureBoundMigration({root:ROOT,privateRoot,account,...registration,receiver,assertOwner,assertIdle,verifyPrivate:privateCheck});
+        const generation=receiver.generation;
+        const candidate=prepareMigrationCandidate({parent:privateRoot,handle:result.handle,account,current:registration.identity,verifyPrivate:privateCheck,
+          assertExclusive:()=>{assertOwner();return receiver.verified && receiver.healthy && receiver.generation===generation;}});
+        log('[migration] 已生成并核验私有快照及隔离候选账本：' + path.basename(result.directory) + '；保持只收件');
+        return {snapshotId:result.snapshotId,directory:result.directory,candidate};
+      })();
+      void snapshot.catch(()=>log('[migration] 快照未通过验收；保持只收件，未启动统一模式'));
+    }
+    closeUnifiedOnShutdown = async () => {
+      await receiver.close(); if (snapshot) await snapshot.catch(()=>{}); registration?.journal.close();
+    };
+    if (snapshot) return { receiver, snapshot, close:closeUnifiedOnShutdown };
     return receiver;
   }
   // Startup-only opt-in: changing the JSON does not hot-switch between owners.
@@ -12305,7 +12338,7 @@ async function main() {
       if (typeof root !== 'string' || !path.isAbsolute(root)) return false;
       const resolved = fs.existsSync(root) ? fs.realpathSync(root) : path.resolve(root);
       const relative = path.relative(resolved, file);
-      return relative.startsWith('..' + path.sep) || path.isAbsolute(relative);
+      return relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative);
     });
   }
   async function handleUnifiedIncoming(key, kind, event, prepare) {
