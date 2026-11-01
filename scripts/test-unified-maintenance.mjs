@@ -1,3 +1,5 @@
+import {activateMaintenance} from '../src/unified/maintenance-activate.js';
+import {createRawInbox} from '../src/unified/raw-inbox.js';
 import {DatabaseSync} from 'node:sqlite';
 import {assertMigrationStartup} from '../src/unified/bridge-driver.js';
 import {UnifiedStore} from '../src/unified/store.js';
@@ -12,7 +14,7 @@ import assert from 'node:assert/strict';
 import {pinOwnerSources,prepareCaptureJournal,captureBoundMigration} from '../src/unified/migration-maintenance.js';
 import {prepareMigrationCandidate} from '../src/unified/migration-candidate.js';
 
-test('maintenance restart reopens the same bound snapshot and paused candidate without advancing delivery', async t=>{
+for(const recover of [true,false]) test(recover?'maintenance resumes a target commit after interruption':'maintenance activates with matching operator reconciliation and drains a queued event',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-maint-')), privateRoot=path.join(root,'state','migration-snapshots');
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   fs.mkdirSync(path.join(root,'state/probes'),{recursive:true});fs.mkdirSync(privateRoot);
@@ -23,7 +25,7 @@ test('maintenance restart reopens the same bound snapshot and paused candidate w
     productionMigrationAuthorized:false,scope:['state/social-v2.json','state/sessions.json']});
   const opts={root,account,verifyPrivate:()=>true,excluded:()=>true,assertOwner(){},assertTrusted:()=>true,hardenFile:()=>({ok:true})};
   pinOwnerSources(opts);
-  const receiver={generation:'g1',verified:true,healthy:true};
+  const receiver={generation:'login:00000000-0000-0000-0000-000000000001',verified:true,healthy:true};
   let previous;
   for(let i=0;i<2;++i) {
     const reg=prepareCaptureJournal(opts);
@@ -65,12 +67,26 @@ test('maintenance restart reopens the same bound snapshot and paused candidate w
           assert.throws(activate,{code:'MIGRATION_INGRESS_PENDING'});
           journal.transfer(current,stage);
           assert.throws(()=>activate({assertCoverage:()=>false}),{code:'MIGRATION_COVERAGE_UNVERIFIED'});
-          for(const point of ['intent','target-committed']){
+          const raw=createRawInbox({file:path.join(root,'state/unified-raw.sqlite'),verifyPrivate:opts.verifyPrivate,hardenFile:opts.hardenFile,assertAccess(){}});
+          raw.observeCapture(account,receiver.generation,'opened');
+          raw.observeCapture(account,receiver.generation,'verified');
+          await raw.close();
+          const host={...opts,handle:snap.handle,candidate,registration:reg,receiver,assertIdle:async()=>true,announce(){}};
+          const stop=new AbortController();
+          const pending=activateMaintenance({...host,signal:stop.signal,announce:()=>setImmediate(()=>stop.abort())});
+          await assert.rejects(pending,{name:'AbortError'});
+          assert.equal(journal.db.prepare('SELECT count(*) AS n FROM activation_intent').get().n,0);
+          if(recover) for(const point of ['intent','target-committed']){
             assert.throws(()=>activate({checkpoint:p=>{if(p===point)throw Error('crash at '+p);}}),new RegExp('crash at '+point));
           }
           const startup=()=>assertMigrationStartup(target,true,path.join(root,'state/migration-ingress.sqlite'));
-          assert.throws(startup,{code:'MIGRATION_STARTUP_UNVERIFIED'});
-          assert.equal(activate().ingressThrough,1);
+          if(recover)assert.throws(startup,{code:'MIGRATION_STARTUP_UNVERIFIED'});
+          else {
+            host.announce=({evidence,snapshot,generation})=>fs.writeFileSync(evidence,JSON.stringify({version:1,account,snapshot,generation,
+              result:'reconciled-all-admitted-inbound',checkedThrough:Date.now(),evidenceReference:'fixture-upstream-ledger'}));
+            journal.append(current,message('during-reconciliation'));
+          }
+          assert.equal((await activateMaintenance(host)).ingressThrough,recover?1:2);
           assert.equal(startup(),true);
           assert.throws(()=>assertMigrationStartup(target,true,path.join(root,'missing.sqlite')),{code:'MIGRATION_STARTUP_UNVERIFIED'});
           assert.deepEqual(activate(),activate());
@@ -79,7 +95,7 @@ test('maintenance restart reopens the same bound snapshot and paused candidate w
           const live={journal,store,current,wakeAllowed:()=>true};
           persistUnifiedIngress(live,message('after-cutover'));
           assert.equal(persistUnifiedIngress(live,message('after-cutover')).receipt.duplicate,true);
-          assert.deepEqual(store.db.prepare('SELECT source_id FROM events WHERE unread=1 ORDER BY seq').all().map(r=>r.source_id),['before-cutover','after-cutover']);
+          assert.deepEqual(store.db.prepare('SELECT source_id FROM events WHERE unread=1 ORDER BY seq').all().map(r=>r.source_id),recover?['before-cutover','after-cutover']:['before-cutover','during-reconciliation','after-cutover']);
         } finally {stage.close();store?.close();}
         write('config.json',{externalChange:true});
         await assert.rejects(captureBoundMigration(args),{code:'MIGRATION_SOURCE_CHANGED'});

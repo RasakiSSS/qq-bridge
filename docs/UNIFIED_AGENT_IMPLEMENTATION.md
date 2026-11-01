@@ -552,3 +552,9 @@ Next connect the installed publication receipt to activation with durable crash 
 
 ### 安装后切换的中断恢复
 activateInstalledCandidate 在独占租约内检查正式目标的文件身份、已发布摘要和快照归属，在开账本前先持久记录切换意图。重入时校验同一文件和切换决定；若目标已提交，只补收件日志的确认。启动端核验安装凭证、时间、边界与日志确认，阻止半提交启动。完整隔离组合 410 项通过（activation-intent-full.log）。收件报告列出最近 30 次连接间未经验证的区间，缺失结束时间保持未知。尚需可信上游覆盖证明和正式维护接线；不得把 assertCoverage 固定为真。测试中的临时安装已覆盖中断续作，尚无生产切换。
+
+### 正式维护入口与隔离验收
+
+维护参数 `--migration-activate-installed=<机器人账号>` 接受已经发布的暂停账本，沿用严格主机锁、已鉴权的接收器及旧模型停稳检查。首次切换时，上游收件覆盖由维护人员核实。程序在等待期间继续保存网关来件，并给出当前 snapshot、generation 和本机专用证据文件的位置。核对从旧路由停止至当前连接确认期间的所有准入群聊、私聊、好友申请等入站数据；漏件需先对齐，无法核实就保持等待。将上游核对记录的引用写入 evidenceReference。没有自动生成该证明的命令。
+
+证据 JSON 字段为 version（1）、account（字符串）、snapshot、generation、result（reconciled-all-admitted-inbound）、checkedThrough（已核对至的毫秒时间戳）、evidenceReference。仅接受当前快照、当前连接以及覆盖登录确认时刻的本地私有记录。切换完成后维护进程继续只收件，正常桥接由独立的受控启动步骤接管。恢复已提交的切换时以持久凭据核对结果。此入口不启动真实模型。仍需处理维护接收器退出至运行接收器上线的最终交接覆盖，以及超旧容量的回退和历史原文对账。完整相关组合 411 项通过；未运行生产维护命令。

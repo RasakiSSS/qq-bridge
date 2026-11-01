@@ -1,3 +1,4 @@
+import { activateMaintenance } from './unified/maintenance-activate.js';
 import { holdMigrationPort } from './unified/maintenance-port.js';
 import { installPausedCandidate } from './unified/migration-install.js';
 import { prepareMigrationCandidate } from './unified/migration-candidate.js';
@@ -93,7 +94,7 @@ const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 const RELATIONSHIPS_FILE = path.join(STATE_DIR, 'relationships.json');
 let closeUnifiedOnShutdown = null;
-const captureArg = process.argv?.slice(2).find(arg => /^--migration-(?:(receive|snapshot)-only|install-staged)/.test(arg));
+const captureArg = process.argv?.slice(2).find(arg => /^--migration-(?:(receive|snapshot)-only|install-staged|activate-installed)/.test(arg));
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1422,10 +1423,11 @@ let stateDirHardened = null;
 async function main() {
   const cfg = loadConfig();
   if (captureArg !== undefined) {
-    const expected = /^--migration-(?:(?:receive|snapshot)-only|install-staged)=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
+    const expected = /^--migration-(?:(?:receive|snapshot)-only|install-staged|activate-installed)=([1-9]\d{0,19})$/.exec(captureArg)?.[1];
     const installStaged = captureArg.startsWith('--migration-install-staged=');
-    const snapshotOnly = installStaged || captureArg.startsWith('--migration-snapshot-only=');
-    if (installStaged && cfg.socialV2?.unified?.enabled===true) throw new Error('暂存安装时必须保持统一调度关闭');
+    const activate = captureArg.startsWith('--migration-activate-installed=');
+    const snapshotOnly = activate || installStaged || captureArg.startsWith('--migration-snapshot-only=');
+    if ((activate || installStaged) && cfg.socialV2?.unified?.enabled===true) throw new Error('暂存安装时必须保持统一调度关闭');
     if (!expected || readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode !== 'reserved2') throw new Error('维护收件须指定账号和已有二代模式');
     const portLease=await holdMigrationPort(Number(cfg.consolePort)||3100);
     try { acquireLock({ strict: true }); } catch(error) { await portLease.close(); throw error; }
@@ -1447,6 +1449,7 @@ async function main() {
     const receiver = await startCaptureReceiver({ account, bot, inbox, allowed: (kind,id) => allowed(kind,id,cfg),
       relationships: relationshipConfig(cfg.socialV2?.relationships).enabled,
       status: value => { if (value === 'ready') ready(); if (value !== lastStatus) log('[migration] 只收件：' + value); lastStatus = value; } });
+    const maintenanceStop=new AbortController();
     let snapshot;
     if (registration) {
       snapshot = (async () => {
@@ -1467,13 +1470,20 @@ async function main() {
         const installed=installStaged ? await installPausedCandidate({root:ROOT,handle:result.handle,candidate,current:registration.identity,
           journal:registration.journal,verifyPrivate:privateCheck,hardenFile,
           assertExclusive:()=>{assertOwner();return receiver.verified && receiver.healthy && receiver.generation===generation;}}) : null;
+        if (activate) {
+          const decision=await activateMaintenance({root:ROOT,handle:result.handle,candidate,registration,receiver,
+            verifyPrivate:privateCheck,assertOwner,assertIdle,signal:maintenanceStop.signal,
+            announce:info=>log('[migration] 等待本地上游对账记录 '+JSON.stringify(info))});
+          log('[migration] 切换凭据已提交，当前进程继续只收件');
+          return {snapshotId:result.snapshotId,decision};
+        }
         log('[migration] 已生成并核验私有快照及隔离候选账本：' + path.basename(result.directory) + '；保持只收件');
         return {snapshotId:result.snapshotId,directory:result.directory,candidate,installed};
       })();
       void snapshot.catch(()=>log('[migration] 快照未通过验收；保持只收件，未启动统一模式'));
     }
     closeUnifiedOnShutdown = async () => {
-      try {await receiver.close(); if (snapshot) await snapshot.catch(()=>{}); registration?.journal.close();}
+      try {maintenanceStop.abort(); await receiver.close(); if (snapshot) await snapshot.catch(()=>{}); registration?.journal.close();}
       finally {await portLease.close();}
     };
     if (snapshot) return { receiver, snapshot, close:closeUnifiedOnShutdown };
