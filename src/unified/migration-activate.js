@@ -1,7 +1,7 @@
 import { snapshotIdentity, snapshotJson } from './migration-snapshot.js';
 import { importMigrationDeltas } from './migration-delta.js';
 import { fail } from './store.js';
-import { projectLegacyQzone } from './migration-qzone.js';
+import { projectLegacyQzone, unresolvedSpaceWrites } from './migration-qzone.js';
 import { migrationFriendRequest, verifyMigrationFriendRequest } from './migration-friend-request.js';
 const equivalent = (a, b) => JSON.stringify(a, sortKeys) === JSON.stringify(b, sortKeys);
 const sortKeys = (_, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -38,7 +38,7 @@ export function activateStagedMigration({ store, stage, journal, handle, lease, 
   };
   idle();
   const legacySpace = snapshotJson(handle, 'qzone.json')?.accounts?.[account];
-  if (legacySpace?.writes?.some(write => !['sent', 'not-sent'].includes(write?.status))) {
+  if (unresolvedSpaceWrites(legacySpace) > 0) {
     throw fail('MIGRATION_ACTION_UNRESOLVED');
   }
   const delta = stage.exportDeltas(account);

@@ -3,6 +3,12 @@ import { accountId, fail } from './store.js';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const id = value => typeof value === 'string' && /^[1-9]\d{0,19}$/.test(value);
 
+export function unresolvedSpaceWrites(data) {
+  if (data == null) return 0;
+  if (!Array.isArray(data.writes)) throw fail('MIGRATION_INVALID_SOURCE');
+  return data.writes.filter(write => !['sent', 'not-sent'].includes(write?.status)).length;
+}
+
 // Project only explicit legacy evidence. Retention limits, historical comments
 // and reply intentions are not acknowledgments. The original partition remains
 // preserved separately, including cursors and uncertain writes.
