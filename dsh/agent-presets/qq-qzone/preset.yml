@@ -1,0 +1,3 @@
+name: QQ 空间自主活动
+description: 仅生成空间 JSON 决策，由桥接审核执行；无聊天令牌、无本地或文件权限。
+order: 13

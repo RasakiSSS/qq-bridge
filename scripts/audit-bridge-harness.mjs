@@ -1,3 +1,9 @@
+import { activateMaintenance } from '../src/unified/maintenance-activate.js';
+import { installPausedCandidate } from '../src/unified/migration-install.js';
+import { prepareMigrationCandidate } from '../src/unified/migration-candidate.js';
+import { prepareCaptureJournal, captureBoundMigration } from '../src/unified/migration-maintenance.js';
+import { verifyMaintenanceAcl } from '../src/unified/maintenance-acl.js';
+import { captureAccount, startCaptureReceiver } from '../src/unified/capture-receiver.js';
 // Execute the real bridge initialization/functions against temporary files and fake peers.
 // No production config, QQ connection, DSH process, or persistent home is accessed.
 import fs from 'node:fs';
@@ -6,6 +12,7 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import vm from 'node:vm';
+import yaml from 'js-yaml';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as markdown from '../src/md-to-plain.js';
@@ -19,12 +26,26 @@ import * as sticker from '../src/sticker-lib.js';
 import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
+import * as roleCard from '../src/role-card.js';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as stateAcl from '../src/state-acl.mjs';
+import * as qzone from '../src/qzone.js';
+import * as qzoneAgent from '../src/qzone-agent.js';
+import * as sharedMemory from '../src/shared-memory.js';
+import * as memoryQzone from '../src/shared-memory-qzone.js';
+import * as memoryWorker from '../src/shared-memory-worker.js';
+import * as relationshipControl from '../src/relationship-control.js';
+import * as nativeFriends from '../src/native-friend-client.js';
+import { createRawInbox } from '../src/unified/raw-inbox.js';
+import * as unifiedHost from '../src/unified/host.js';
+import * as unifiedDriver from '../src/unified/bridge-driver.js';
+import * as unifiedSend from '../src/unified/bridge-send.js';
+import * as unifiedRelations from '../src/unified/relationships.js';
+import * as unifiedFiles from '../src/unified/files.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
+export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {}, args = [] } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-audit-bridge-'));
   fs.mkdirSync(path.join(temp, 'src'));
   fs.mkdirSync(path.join(temp, 'state'));
@@ -38,9 +59,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   for (const [rel, content] of Object.entries(files)) {
     const target = path.join(temp, rel);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content));
+    fs.writeFileSync(target, typeof content === 'string' || Buffer.isBuffer(content) ? content : JSON.stringify(content));
   }
-  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [] };
+  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [], requests: [], requestHandlers: [] };
   // 语音发送在桥接里是**直接 fetch 网关**（与文本/表情共用 sendChain，但要自己带 record 段），
   // 所以这里给 VM 注入一个记录型 fetch：既不让测试真的发 QQ 消息，又能断言发出的段内容。
   const fakeFetch = async (url, init = {}) => {
@@ -90,7 +111,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       archiveSession: async ({ sessionId }) => { calls.archived.push(sessionId); return success({}); },
     },
     sessions: {
-      create: async (params) => { calls.created.push(params); return success({ sessionId: `fixture-${calls.created.length}` }); },
+      create: async (params) => { calls.created.push(params); return success({ sessionId: params.sessionId || `fixture-${calls.created.length}` }); },
       selectModel: async () => success({ selected: { provider: 'fixture', model: 'fixture' } }),
       prompt: async (params) => { calls.prompts.push(params); return success({}); },
     },
@@ -99,6 +120,13 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     callUnary: async (method, params) => { calls.cancelled.push({ method, params }); return success({ accepted: true }); },
   };
   class FakeBot {
+    constructor() { this.requestHandlers = new Map(); }
+    onRequest(type, handler) {
+      this.requestHandlers.set(String(type), handler);
+      calls.requestHandlers.push(String(type));
+      return () => { if (this.requestHandlers.get(String(type)) === handler) this.requestHandlers.delete(String(type)); };
+    }
+    emitRequest(type, event) { return this.requestHandlers.get(String(type))?.(event); }
     async sendPrivateMessage(id, text) { calls.sent.push({ kind: 'private', id, text }); }
     async sendGroupMessage(id, text) { calls.sent.push({ kind: 'group', id, text }); }
     async getImage({ file }) {
@@ -108,6 +136,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     }
     async fetchFaceEntity(id) { calls.faces.push(id); return null; }
     async request(action, params = {}) {
+      calls.requests.push({ action, params });
       // 群成员列表：v2 读工具 qq_get_group_members 会用到（含 WS 不可用时的 HTTP 兜底路径）。
       if (action === 'get_group_member_list') {
         return {
@@ -143,13 +172,24 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
+    unifiedDriver, handleUnifiedIncoming, unifiedContext, pollUnifiedQzone,
+    acquireLock, saveState, saveSocialV2State, saveInitialPrompts,
+    setStateWritableForTest(value) { stateWritable = value; },
+    setInitialPromptsWritableForTest(value) { initialPromptsWritable = value; },
+    setConnected(value) { snowlumaHealth.connected = value; },
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
-    getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
+    createSocialV2State, getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     syncStickerLibrary, listStickersForV2, getStickerImageData,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
+    pendingWakeKeys, disarmPendingWakeLease,
+    peakSleepTickV2, peakSleepBlocksV2, automaticModelBlockedV2,
+    qzoneService, qzoneAgent, assertQzoneAllowed, sharedMemory, recallForConversation, memoryWorker, assertMemoryModelAllowed,
+    scheduleWakeV2, scheduleReplyCheckV2, scheduleProactiveCheckV2,
+    runSlangExtraction, runSlangResearch, slangWindows, slangEntries, feedSlangWindow,
+    acknowledgeMessagesV2, noteModelMessagesV2, loadSocialV2State,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
@@ -165,6 +205,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     flushQueue, retireSession,
     voiceCfg, voiceLibrary, resolveVoicePathForV2, resolveVoicePathForOperator,
     voiceBudgetCheck, sendVoiceV2, sendVoiceForV2, assertOutboundAuditOk,
+    syncStickerLibrary, getStickerEntries() { return stickerEntries; },
     setMode(value) { currentMode = value; },
     setReady(value) { dshReady = value; },
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
@@ -173,21 +214,22 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bot.onPrivateMessage(async (event) => {`);
   const timers = new Set();
   const context = vm.createContext({
-    fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
+    fs, os, path, http, crypto, yaml, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
     fetch: fakeFetch,
     // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；
     // 固定桩掉：测试不应该真去 netstat 宿主机。
     execFileSync: () => '',
     // process 桩要带 env：voice-core / bridge 会读 process.env.FFMPEG_PATH、FFPROBE_PATH 等。
     // 之前只给 pid/platform/kill/exit，导致 `process.env.FFMPEG_PATH` 直接抛 TypeError。
-    process: { pid: process.pid, platform: process.platform, kill: process.kill, env: {}, exit: (code) => { throw new Error('unexpected exit ' + code); } },
+    process: { argv: ['node', 'bridge.js', ...args], pid: process.pid, platform: process.platform, kill: process.kill, env: {}, exit: (code) => { throw new Error('unexpected exit ' + code); } },
     setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; },
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...qzone, ...qzoneAgent, ...sharedMemory, ...memoryQzone, ...memoryWorker, ...relationshipControl, ...nativeFriends,
+    activateMaintenance, AbortController, holdMigrationPort:async()=>({assert(){},async close(){}}), installPausedCandidate, prepareMigrationCandidate, prepareCaptureJournal, captureBoundMigration, verifyMaintenanceAcl, captureAccount, startCaptureReceiver, createRawInbox, ...unifiedHost, ...unifiedDriver, ...unifiedSend, ...unifiedRelations, ...unifiedFiles,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。
     normalizeImageForModel: mediaNormalize.normalizeImageForModel,
     sniffImage: mediaNormalize.sniffImage,
@@ -221,10 +263,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   vm.runInContext(`Object.assign(globalThis, (() => { ${modelViewSource}\nreturn { compactModelMessage, compactModelData, serializeModelData, describeAge }; })());`, context);
   vm.runInContext(source + '\nglobalThis.auditReady = main();', context);
   const bridge = await context.auditReady;
-  bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2']);
+  if (args.some(a => /^--migration-(?:(receive|snapshot)-only|install-staged)/.test(a))) return { receiver: bridge, temp, calls,
+    async close() { await bridge.close(); fs.rmSync(temp, { recursive: true, force: true }); } };
+  bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2', 'qq-chat-v2-files', 'qq-qzone', 'qq-memory']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
+    await bridge.unifiedDriver?.close();
     for (const timer of timers) clearTimeout(timer);
+    bridge.sharedMemory.close();
     fs.rmSync(temp, { recursive: true, force: true });
   } };
 }

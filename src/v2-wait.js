@@ -25,3 +25,5 @@ export const UNFINISHED_PROMPT_REPLIES = ['什么', '啥', '你说啊', '然后�
 // 建议的“结束前再等一轮”的等待时长范围（毫秒）。
 export const END_ROUND_WAIT_MIN_MS = 5 * 60 * 1000;
 export const END_ROUND_WAIT_MAX_MS = 10 * 60 * 1000;
+
+export const EXPLICIT_END_RE = /(?:不聊了|不说了|晚安|睡了|先睡了|下了|先下了|拜拜|再见|走了|先走|撤了|去忙|忙了|下次再聊|下次聊|散了吧|结束|就到这|先这样|就这样吧|886|88|睡觉了|下班了|去洗澡|去吃饭了)/i;

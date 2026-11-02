@@ -1,0 +1,11 @@
+{
+  "manifest_version": 4,
+  "type": "extension",
+  "name": "QQ 好友能力只读探针",
+  "slug": "qq-bridge-friend-probe",
+  "description": "观察 QQ 自己创建的会话和好友服务，只记录能力是否存在，不调用好友操作。",
+  "version": "0.1.0",
+  "authors": [{ "name": "qq-bridge", "link": "" }],
+  "platform": ["win32"],
+  "injects": { "main": "main.cjs" }
+}

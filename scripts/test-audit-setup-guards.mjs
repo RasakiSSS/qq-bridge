@@ -1,12 +1,22 @@
-// Execute both real preset plugins against a captured tools service, without DSH/QQ.
+// Execute the guards configured by all QQ presets, without DSH/QQ.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import yaml from 'js-yaml';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let failures = 0;
-for (const preset of ['qq-chat', 'qq-chat-v2']) {
-  const { apply } = await import(pathToFileURL(path.join(root, 'dsh/agent-presets', preset, 'qq-tool-restrict.mjs')).href);
+for (const preset of ['qq-chat', 'qq-chat-v2', 'qq-chat-v2-files', 'qq-qzone']) {
+  const adminFiles = preset === 'qq-chat-v2-files';
+  const source = yaml.load(fs.readFileSync(path.join(root, 'dsh/agent-presets', preset, 'agent.cordis.yml'), 'utf8'));
+  const configuredGuard = source.find(row => row.id === 'qq-tool-restrict');
+  assert.equal(configuredGuard.name, adminFiles
+    ? 'qq-agent-presets/qq-tool-restrict-files.mjs' : './qq-tool-restrict.mjs');
+  const guardFile = adminFiles
+    ? path.join(root, 'plugins/qq-agent-presets/qq-tool-restrict-files.mjs')
+    : path.join(root, 'dsh/agent-presets', preset, 'qq-tool-restrict.mjs');
+  const { apply } = await import(pathToFileURL(guardFile).href);
   let guard;
   const restricted = [];
   apply({ tools: {
@@ -15,12 +25,20 @@ for (const preset of ['qq-chat', 'qq-chat-v2']) {
   } });
   assert.equal(typeof guard, 'function');
   assert.ok(restricted.includes('dev_install_package'));
-  for (const name of ['ask_user_question', 'todo_write', 'mcp__snowluma__qq_send_message',
+  for (const name of ['ask_user_question', 'todo_write', 'compress', 'decompress', 'search_context', 'acp_status',
+    'mcp__snowluma__qq_send_message',
     'mcp__snowluma-host__snowluma_status', 'mcp__web-search-safe__web_fetch']) {
     assert.equal(guard({ name }), undefined, `${preset}: expected allowed ${name}`);
+    assert.ok(!restricted.includes(name), `${preset}: allowed tool must not be hidden: ${name}`);
+  }
+  for (const name of ['mcp__qq-workspace-files__read_text_file', 'mcp__qq-workspace-files__write_file']) {
+    assert.equal(typeof guard({ name }), adminFiles ? 'undefined' : 'string', `${preset}: file boundary for ${name}`);
   }
   for (const name of ['web_fetch', 'web_search', 'bash', 'read_file', 'dev_future_tool',
-    'mcp__untrusted__web_fetch', '', null, undefined]) {
+    'mcp__untrusted__web_fetch', 'mcp__qq-workspace-files__delete_file',
+    'acp_delegate', 'acp_delegate_wait', 'acp_delegate_cancel', 'acp_future_tool',
+    'compress_all', 'decompress_file', 'search_context_global', 'acp_status_all',
+    'mcp__billion-context__compress', '', null, undefined]) {
     try { assert.equal(typeof guard({ name }), 'string', `${preset}: must reject ${String(name)}`); }
     catch (error) { failures++; console.error(`FAIL ${error.message}`); }
   }
@@ -29,7 +47,6 @@ for (const preset of ['qq-chat', 'qq-chat-v2']) {
 // ── state/ 权限收紧（Windows 上 mode 0o600 是空操作，必须动 ACL）的离线守卫 ──────────
 // 这里只做"结构 + 编码"级断言：真正的 icacls/UAC 行为在这个环境里跑不了（沙箱禁止改 ACL），
 // 而**假装测过**比不测更危险，所以明确只钉住下面这些不会骗人的事实。
-import fs from 'node:fs';
 {
   const helperPath = path.join(root, 'scripts/harden-state-acl.mjs');
   assert.ok(fs.existsSync(helperPath), 'ACL 收紧助手必须存在（start.bat 依赖它）');

@@ -1880,7 +1880,8 @@ button:active:not(:disabled) {
       <div class="row" style="margin-bottom:8px">
         <label style="flex:0 0 auto">仿真代次</label>
         <select id="simPromptPreset" style="flex:0 1 280px">
-          <option value="qq-chat-v2">二代仿真（reserved2 · qq-chat-v2）</option>
+          <option value="qq-unified">统一主会话（qq-unified，独立编辑）</option>
+          <option value="qq-chat-v2" selected>二代仿真（reserved2 · qq-chat-v2）</option>
           <option value="qq-chat">一代仿真（reserved · qq-chat）</option>
         </select>
         <span class="meta">两代机制不同（一代空格分条 / 二代一切皆工具），提示词各自独立。</span>
@@ -2045,6 +2046,7 @@ button:active:not(:disabled) {
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="listStickers"> <span><b>qq_list_stickers</b><span class="meta">查看/搜索 QQ 收藏表情（含备注和本地笔记）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getStickerImage"> <span><b>qq_get_sticker_image</b><span class="meta">看图理解没有备注的收藏表情</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendSticker"> <span><b>qq_send_sticker</b><span class="meta">发送收藏表情（一条消息只能一张，不能带文字）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="deleteSticker"> <span><b>qq_delete_sticker</b><span class="meta">删除一张 QQ 收藏表情及其本地笔记（影响整个账号）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="collectSticker"> <span><b>qq_collect_sticker</b><span class="meta">AI 偶尔收藏别人发的表情并写简短备注</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getSelfImage"> <span><b>qq_get_self_image</b><span class="meta">查看自己的默认 Q 版形象图片</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="stickerNote"> <span><b>qq_sticker_note</b><span class="meta">给表情记录本地含义/标签/用法</span></span></label>
@@ -3106,7 +3108,7 @@ document.getElementById('simPromptCancel').addEventListener('click', () => {
 document.getElementById('simPromptPreset').addEventListener('change', () => { refreshSimPrompt(); });
 document.getElementById('simPromptSave').addEventListener('click', async () => {
   const content = document.getElementById('simPromptText').value;
-  if (!confirm('保存会改写该代预设的源文件并同步到 DSH 的 preset 目录（新会话生效，进行中的会话需重置或重启 DSH）。确定继续？')) return;
+  if (!confirm('保存会改写所选预设源文件并同步已安装副本。不会自动启用统一模式或迁移旧预设；不会重置会话，已运行会话的加载需另行安排。确定继续？')) return;
   setSimMsg('保存中…');
   const r = await api('/api/preset/sim-prompt', 'POST', { preset: simPromptPreset, content });
   if (!r.ok) { setSimMsg('❌ ' + (r.error || '保存失败'), false); return; }
@@ -4486,6 +4488,16 @@ function updateOverview(status, modeLabel) {
   document.getElementById('metricDsh').textContent = status.dshReady ? '已连接' : '未连接';
   document.getElementById('metricDsh').className = status.dshReady ? 'ok' : 'err';
   document.getElementById('metricDshHint').textContent = status.dshReady ? '桥接状态已同步' : '请检查 DSH 是否运行';
+  let unified = document.getElementById('unifiedOverview');
+  if (!unified) {
+    unified = document.createElement('p'); unified.id = 'unifiedOverview';
+    document.getElementById('accessSummary').after(unified);
+  }
+  unified.hidden = !status.unified?.enabled;
+  const u = status.unified;
+  if (u?.enabled) unified.textContent = u.ready
+    ? `统一主会话 · ${u.permission} · ${u.migration === 'staged' ? '待迁移验收' : u.paused ? '已暂停' : '运行中'} · ${u.peak ? '峰期' : '谷期'} · 当前 ${u.currentScene || '主菜单'} · 未读 ${u.counts.unread} · 调度 ${u.dispatch} · 待到期提醒 ${u.pendingTimers}`
+    : '统一主会话已配置，等待账号与运行器就绪';
   renderSnowlumaHealth(status.snowluma);
   document.getElementById('metricMode').textContent = modeLabel.replace('模式', '');
   document.getElementById('metricRole').textContent = '角色 · ' + (status.role || '默认人格');

@@ -13,15 +13,27 @@
 | --- | --- | --- |
 | [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | **权威项目说明书**（113 KB / 1450+ 行）：架构、内外核划分、数据流、配置全解、安全机制、调试与改进指南，含 2026-08-20 ~ 2026-09-11 的逐轮更新记录 | ✅ **唯一权威版本**（另一份同名精简版已归档到 legacy，见下） |
 | [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与三个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
+| [guides/QZONE.md](guides/QZONE.md) | 空间自主浏览、发说说、评论与 @ 唤醒：配置、权限、去重及轮询范围 | ✅ |
+| [guides/RELATIONSHIPS.md](guides/RELATIONSHIPS.md) | QQ 关系控制：好友申请记录、接受/拒绝、删除好友、退群、权限边界与离线验证 | ✅ 默认关闭 |
 | [guides/VOICE.md](guides/VOICE.md) | 语音发送全解：独立工具（`voice-tool/` 的图形界面与命令行）、桥接 CLI、AI 工具、控制台面板，以及**工具拆出后的配置解析顺序** | ✅ 2026 整理时已更新（工具移到上一级 `voice-tool/`） |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 控制台离线预览（`npm run preview:console`）与离线浏览器回归（`npm run test:console-ui`）怎么用 | ✅ 2026 整理时自 `scripts/` 移入 |
 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) | **安全基线与威胁模型**：威胁主体、已实现的边界（准入/工具面/出站/控制台/落盘/网络）、已知残余风险、发布前回归清单、改动检查单 | ✅ **改动安全相关代码前必读**（2026-09-20 新增） |
 
+## 交接文档 —— 当前实施状态与交接
+
+| 文档 | 一句话说明 | 状态 |
+| --- | --- | --- |
+| [QQ_RELATIONSHIPS_HANDOFF.md](QQ_RELATIONSHIPS_HANDOFF.md) | QQ 关系控制的当前开启配置、MCP 调用顺序、运行时保护、验证结果和主动加好友边界 | ✅ 当前交接 |
+
 ## design/ —— 设计与规划（读设计意图用）
 
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
+| [UNIFIED_AGENT_REQUIREMENTS.md](UNIFIED_AGENT_REQUIREMENTS.md) | 单一主 Agent、聊天与空间场景切换、全局权限、未读和峰谷规则 | 需求定稿，分阶段实施中 |
+| [UNIFIED_AGENT_VALIDATION_PLAN.md](UNIFIED_AGENT_VALIDATION_PLAN.md) | 一致性审查结论与 P1 技术验证清单 | 目标清单；首轮结果见 P1 报告 |
+| [UNIFIED_AGENT_P1_REPORT.md](UNIFIED_AGENT_P1_REPORT.md) | 已安装 DSH 协议证据、隔离验证结果及统一主体模块设计 | P1 历史结果；最新进度见实施状态 |
+| [UNIFIED_AGENT_IMPLEMENTATION.md](UNIFIED_AGENT_IMPLEMENTATION.md) | 统一主体基础模块、测试结果和剩余接入工作 | DSH 适配、动作账本和运行组合已测，生产接线待完成 |
 | [design/GEN2_SIMULATION_PLAN.md](design/GEN2_SIMULATION_PLAN.md) | 二代仿真（`reserved2`）「一切皆工具」实施计划：WakeConfig 唤醒调度、MCP 工具集、控制台参数、`qq-chat-v2` preset | ⚠️ 骨架/API/调度/MCP/UI 均已落地，文中「状态：实施中」与残留 TODO 以当前代码为准 |
 | [design/SOCIAL_MODE_PLAN.md](design/SOCIAL_MODE_PLAN.md) | 一代仿真模式（`reserved`）的头脑风暴定案：规则引擎管「何时说」、LLM 管「说什么」 | ⚠️ 描述的一代状态机已实现；`reserved2` 已是默认模式，设计背景仍有效 |
 | [design/DSH_QQ_TOOLS_PLAN.md](design/DSH_QQ_TOOLS_PLAN.md) | 「一切皆工具」总路线与交接文档：当前能力盘点、安全性设计、分阶段计划 | ⚠️ 阶段计划大部分已完成，作为路线/安全设计参考仍有效 |
