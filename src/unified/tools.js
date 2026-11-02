@@ -55,6 +55,7 @@ const definitions = {
   qq_join_session: ['进入群聊、私聊或空间。峰期禁止新进入普通场景，失败保留原场景。', { key }],
   qq_quit_session: ['退出当前场景并返回主菜单。峰期退出后不能重新进入普通场景。', {}],
   qq_get_unread_msg: ['读取当前场景原文，默认一批 30 条；不会自动标记已读。incompleteSeqs 表示只有旧预览，read 回执不覆盖这些消息；若明确决定略过可使用额外 skipReceipt。', { capability: handle, limit }],
+  qq_get_message_images: ['查看当前聊天消息的图片或表情。seq 使用统一收件箱序号，index 从 0 开始，按图片和表情的顺序计数。', { capability: handle, seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER), index: z.number().int().nonnegative().optional() }],
   qq_mark_read: ['确认已读或明确略过回执中的消息；不会清除回执之后到达的消息。', { receipt: handle }],
   qq_qzone_publish: ['在已进入的空间发表文字说说；可见范围、每日额度和间隔由可信配置决定。unknown 时禁止重复发送。', qzoneText],
   qq_qzone_comment: ['评论空间收件箱中已提供的说说，postKey 使用消息 payload.key；@ 使用 mentions。unknown 时禁止重复发送。', { ...qzoneText, postKey: z.string().min(1).max(500) }],
@@ -108,7 +109,7 @@ const toolFlags = {
   qq_recall: 'memory', qq_remember: 'memory',
   qq_qzone_status: 'qzoneRead', qq_qzone_refresh: 'qzoneRead',
   qq_list_friend_requests: 'relationships', ...Object.fromEntries(Object.keys(relationTools).map(name => [name, 'relationships'])),
-  qq_get_unread_msg: 'getUnread', qq_mark_read: 'markRead', qq_send_message: 'sendMessage',
+  qq_get_message_images: 'getImages', qq_get_unread_msg: 'getUnread', qq_mark_read: 'markRead', qq_send_message: 'sendMessage',
   qq_wait_for_events: 'waitMessages', qq_wait_for_messages: 'waitMessages', qq_set_wake_config: 'setWakeConfig',
   qq_qzone_publish: 'qzonePublish', qq_qzone_comment: 'qzoneComment', qq_qzone_reply: 'qzoneComment',
 };
@@ -119,10 +120,10 @@ const toolFlags = {
 export class UnifiedTools {
   #credential;
   #tail = Promise.resolve();
-  constructor({ scenes, actions, attention, relationships, memory, summaries, persona, toolAllowed = () => true }) {
+  constructor({ scenes, actions, attention, relationships, memory, summaries, persona, fetchImage, toolAllowed = () => true }) {
     this.scenes = scenes; this.actions = actions; this.attention = attention; this.toolAllowed = toolAllowed;
     this.relationships = relationships;
-    this.memory = memory;
+    this.memory = memory; this.fetchImage = fetchImage;
     this.summaries = summaries; this.persona = persona;
   }
   #checkTool(name) { if (toolFlags[name] && this.toolAllowed(toolFlags[name]) !== true) throw fail('TOOL_DENIED'); }
@@ -171,6 +172,10 @@ export class UnifiedTools {
       if (this.#authorize(token) !== credential) throw fail('UNAUTHORIZED');
       this.#checkTool(name);
     };
+    if (name === 'qq_mark_read') return Promise.resolve().then(() => {
+      check();
+      return this.scenes.markRead(parsed.data.receipt, (account, key) => this.attention?.observeBeforeSleep(account, key));
+    });
     const result = this.#tail.then(async () => {
       check();
       const a = parsed.data;
@@ -213,7 +218,18 @@ export class UnifiedTools {
           return this.scenes.quit(check);
         }
         case 'qq_get_unread_msg': return this.scenes.read(a.capability, a.limit);
-        case 'qq_mark_read': return this.scenes.markRead(a.receipt,(account,key)=>this.attention?.observeBeforeSleep(account,key));
+        case 'qq_get_message_images': {
+          const cap = this.scenes.authorize(a.capability);
+          const event = this.scenes.store.db.prepare("SELECT payload FROM events WHERE account=? AND scene=? AND seq=? AND kind='message'").get(cap.account, cap.key, a.seq);
+          const media = event && JSON.parse(event.payload).media;
+          const item = Array.isArray(media) && media.filter(entry => ['image', 'sticker'].includes(entry?.kind))[a.index ?? 0];
+          if (!item || !this.fetchImage) throw fail('IMAGE_UNAVAILABLE');
+          const image = await this.fetchImage(item);
+          check();
+          this.scenes.authorize(a.capability);
+          if (!image?.buffer?.length || !['image/png','image/jpeg','image/gif','image/webp'].includes(image.mimeType)) throw fail('IMAGE_UNAVAILABLE');
+          return { type: 'image', data: image.buffer.toString('base64'), mimeType: image.mimeType };
+        }
         case 'qq_wait_for_events':
           if (!this.attention) throw fail('TOOL_DENIED');
           return this.attention.waitEvents(check);
@@ -245,7 +261,7 @@ export class UnifiedTools {
   }
 }
 
-const errors = new Set(['MIGRATION_PENDING', 'UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
+const errors = new Set(['IMAGE_UNAVAILABLE', 'MIGRATION_PENDING', 'UNAUTHORIZED', 'TOOL_DENIED', 'INVALID_ARGUMENTS', 'PAUSED',
   'PERSONA_CHANGED', 'PERSONA_UNAVAILABLE',
   'SUMMARY_INPUT_TOO_LARGE', 'SUMMARY_NOT_READY', 'SUMMARY_SOURCE_INCOMPLETE',
   'FILES_UNAVAILABLE', 'FILE_PATH_DENIED',
@@ -263,6 +279,7 @@ export function createUnifiedMcpServer({ dispatch }) {
     server.tool(name, description, shape, async (args, extra) => {
       try {
         const result = await dispatch(name, args, extra?._meta);
+        if (name === 'qq_get_message_images') return { content: [result] };
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (error) {
         const code = errors.has(error?.code) ? error.code : 'UNIFIED_TOOL_FAILED';

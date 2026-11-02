@@ -56,9 +56,9 @@ test('revocation during asynchronous join blocks mutation and queued calls', asy
 test('host tool switches are rechecked after a call has waited in the queue', async t => {
   const gate = deferred(), entered = deferred();
   const f = fixture(t, async () => { entered.resolve(); await gate.promise; });
-  let enabled = true; f.tools.toolAllowed = flag => flag !== 'markRead' || enabled;
+  let enabled = true; f.tools.toolAllowed = flag => flag !== 'getUnread' || enabled;
   const join = f.call('qq_join_session', { key: 'group:1' });
-  const queued = f.call('qq_mark_read', { receipt: 'not-delivered' });
+  const queued = f.call('qq_get_unread_msg', { capability: 'invalid' });
   const rejection = assert.rejects(queued, { code: 'TOOL_DENIED' });
   await entered.promise; enabled = false; gate.resolve(); await join; await rejection;
 });
@@ -94,7 +94,7 @@ test('real MCP list/call transport exposes only registered tools, keeps credenti
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(a); await client.connect(b);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 27);
+  assert.equal(list.tools.length, 28);
   assert.ok(!JSON.stringify(list).includes(f.token));
   assert.ok(!JSON.stringify(list).includes('ownerQQ'));
   const joined = await client.callTool({ name: 'qq_join_session', arguments: { key: 'group:1' } });
@@ -112,4 +112,36 @@ test('MCP errors never echo arbitrary upstream exception messages or codes', asy
   await server.connect(a); await client.connect(b);
   const result = await client.callTool({ name: 'qq_get_main_menu', arguments: {} });
   assert.equal(result.content[0].text, 'UNIFIED_TOOL_FAILED');
+});
+
+test('mark_read completes while another tool is waiting and only acknowledges its receipt', async t => {
+  const f = fixture(t), started = deferred(), release = deferred();
+  const add = id => f.store.append({ account: '100', scene: 'group:1', sourceId: id, payload: {text:id} });
+  add('first');
+  const cap = await f.call('qq_join_session', { key:'group:1' });
+  const page = await f.call('qq_get_unread_msg', {capability:cap.capability});
+  f.tools.attention = { waitMessages: async () => { started.resolve(); await release.promise; }, observeBeforeSleep() {} };
+  const waiting = f.call('qq_wait_for_messages', {capability:cap.capability});
+  await started.promise;
+  try {
+    add('later');
+    assert.equal((await f.call('qq_mark_read', {receipt:page.receipt})).marked,1);
+    assert.equal(f.store.counts('100')[0].unread,1);
+  } finally { release.resolve(); await waiting; }
+});
+
+test('image lookup scopes source and credential to the current chat', async t => {
+  const f = fixture(t);
+  const {event} = f.store.append({account:'100',scene:'group:1',sourceId:'photo',payload:{media:[{kind:'image',file:'fixture'}]}});
+  const fetch = async item => { assert.equal(item.file,'fixture'); return {buffer:Buffer.from('fixture'),mimeType:'image/png'}; };
+  f.tools.fetchImage = fetch;
+  const join = key => f.call('qq_join_session',{key});
+  const get = cap => f.call('qq_get_message_images',{capability:cap.capability,seq:event.seq});
+  const other = await join('group:2');
+  await assert.rejects(get(other),{code:'IMAGE_UNAVAILABLE'});
+  const here = await join('group:1');
+  await assert.rejects(get(other),{code:'STALE_SCENE'});
+  assert.equal((await get(here)).data,Buffer.from('fixture').toString('base64'));
+  f.tools.fetchImage = async item => { f.tools.revoke(); return fetch(item); };
+  await assert.rejects(get(here),{code:'UNAUTHORIZED'});
 });

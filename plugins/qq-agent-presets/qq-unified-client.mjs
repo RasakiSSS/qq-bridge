@@ -39,18 +39,42 @@ export async function invokeMainTool(tool, args, exec, readBinding = readMainBin
     // Server provides only static sanitized error codes. Do not expose client
     // transport errors, which can contain credentials or local endpoint details.
     if (result.isError) return { error: true, text };
+    if (tool === 'qq_get_message_images') {
+      const image = result.content.find(item => item.type === 'image');
+      if (!image) return { error: true, text: 'IMAGE_UNAVAILABLE' };
+      return { image };
+    }
     return { error: false, text };
   } catch { throw new Error('UNIFIED_CONNECTION_FAILED'); }
   finally { await client?.close().catch(() => {}); }
 }
 
 export function apply(ctx) {
+  const images = new WeakMap();
   for (const definition of unifiedToolCatalog()) {
     ctx.tools.register({ ...definition,
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+      projectContent(exec, result) {
+        const attachment = images.get(exec);
+        images.delete(exec);
+        if (attachment && !result.isError && result.value === '已读取图片') return [{ type: 'image', attachment }];
+      },
       async execute(args, exec) {
         const result = await invokeMainTool(definition.name, args, exec);
         if (result.error) throw new Error(result.text);
+        if (result.image) {
+          const route = exec.agent.session.requestHeader?.()?.config;
+          const provider = route?.provider ?? exec.agent.options?.provider;
+          const model = route?.model ?? exec.agent.options?.model;
+          const info = await ctx.get('llm')?.resolveModelInfo(provider, model, exec.signal);
+          if (!info?.inputModalities?.includes('image')) throw new Error('当前模型路由未声明支持看图');
+          const attachments = ctx.get('attachments');
+          if (!attachments) throw new Error('图片存储未就绪');
+          exec.signal?.throwIfAborted();
+          const [attachment] = await attachments.saveImages([{ data: Buffer.from(result.image.data, 'base64'), mediaType: result.image.mimeType }]);
+          images.set(exec, attachment);
+          return '已读取图片';
+        }
         return result.text;
       },
     });

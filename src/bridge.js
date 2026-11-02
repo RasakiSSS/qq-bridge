@@ -12440,6 +12440,7 @@ async function main() {
         return startUnifiedHost({ bindingFile: path.join(STATE_DIR, 'unified-mcp.json'),
           assertInstallationOwner: assertUnifiedInstallation, isExcludedFromModelFiles: unifiedBindingExcluded,
           runtimeOptions: {
+            fetchImage: fetchOneBotImage,
             cutoverInbox: { file: path.join(STATE_DIR, 'migration-ingress.sqlite'), verifyPrivate: isHardened, excluded: unifiedBindingExcluded,
               wakeAllowed: row => row.kind === 'message' ? !!row.payload.reason : row.payload.mentioned === true
                 || (row.kind === 'qzone-comment' && cfg.socialV2?.qzone?.autoReplyComments !== false) },

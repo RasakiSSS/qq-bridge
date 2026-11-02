@@ -24,7 +24,7 @@ export class UnifiedRuntime {
   #closed = false;
   constructor({ file, cutoverInbox, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
-    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, sleepBounds, relationships, files, memory, summaries, readPersona, legacyCommand, now = Date.now }) {
+    handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, fetchImage, sleepBounds, relationships, files, memory, summaries, readPersona, legacyCommand, now = Date.now }) {
     if (!file || typeof configureModel !== 'function' || typeof bindMainTools !== 'function'
       || typeof isWakeAllowed !== 'function') throw fail('RUNTIME_HOST_ADAPTER_REQUIRED');
     this.store = new UnifiedStore(file);
@@ -68,7 +68,7 @@ export class UnifiedRuntime {
           this.#context(); api.events.forget?.(sid);
         } });
       if (readPersona) this.persona = new UnifiedPersona({ scenes: this.scenes, read: readPersona });
-      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, memory: this.memory, summaries: this.summaries, persona: this.persona, toolAllowed });
+      this.tools = new UnifiedTools({ scenes: this.scenes, actions: this.actions, attention: this.attention, relationships: this.relationships, memory: this.memory, summaries: this.summaries, persona: this.persona, fetchImage, toolAllowed });
       this.management = new UnifiedManagement({ scenes: this.scenes, authenticateQQ, authenticateConsole, legacyCommand, now });
       this.scheduler = new UnifiedScheduler({ store: this.store, scenes: this.scenes, isWakeAllowed, now, personaStatus: () => this.persona?.status(),
         ensureSession: async identity => {
