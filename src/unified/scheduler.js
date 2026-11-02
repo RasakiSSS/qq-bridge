@@ -116,7 +116,7 @@ export class UnifiedScheduler {
       // never permission to replay. A dispatching row blocks work after restart.
       this.store.db.prepare("UPDATE dispatches SET status=? WHERE id=? AND status IN ('preparing','dispatching')")
         .run(attempted ? 'unknown' : 'deferred', row.id);
-      if (!attempted && !['PAUSED', 'PEAK_SCENE_ENTRY_BLOCKED', 'IDENTITY_CHANGED', 'SCENE_DENIED', 'STALE_WAKE'].includes(error.code)) this.backoff(row.account);
+      if (!attempted && !['PAUSED', 'PEAK_SCENE_ENTRY_BLOCKED', 'IDENTITY_CHANGED', 'SCENE_DENIED', 'STALE_WAKE', 'MAIN_SESSION_REPLACED'].includes(error.code)) this.backoff(row.account);
       return { status: this.store.dispatch(row.id).status, requestId: row.id, error: error.code || 'PREFLIGHT_FAILED' };
     }
   }

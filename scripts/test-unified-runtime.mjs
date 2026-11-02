@@ -13,9 +13,9 @@ function fixture(t, overrides = {}) {
       create: async input => { creates.push(input); sid = input.sessionId; rows = [{ sessionId: sid, formatStatus: 'current', running: false }]; return ok({ sessionId: sid }); },
       prompt: async input => { prompts.push(input); return ok({ accepted: true }); },
     },
-    callUnary: async method => {
+    callUnary: async (method, {sessionId}) => {
       assert.equal(method, 'session/projections');
-      return ok(sid ? { kind: 'sequenced', asOfSeq: 0, values: { agentPreset: 'qq-unified', inbox: { 'next-step': [], 'next-turn': [] } } } : null);
+      return ok(sid && sid === sessionId ? { kind: 'sequenced', asOfSeq: 0, values: { agentPreset: 'qq-unified', inbox: { 'next-step': [], 'next-turn': [] } } } : null);
     },
     events: { follow: id => follows.push(id) },
   };
@@ -27,6 +27,7 @@ function fixture(t, overrides = {}) {
     authenticateQQ: async () => false, authenticateConsole: async () => false, now: () => time, ...overrides });
   t.after(() => runtime.close());
   return { runtime, ctx, api, prompts, creates, follows, binds,
+    removeSession() { sid = undefined; rows = []; },
     get token() { return token; }, get sid() { return sid; }, advance: ms => time += ms,
     add: (key, id) => runtime.ingest({ key, sourceId: id, payload: { text: id }, at: time }),
     async end(request, turn = 1, base = 0) {
@@ -145,4 +146,24 @@ test('operator status is read-only, works while paused and contains no message p
     assert.ok(!JSON.stringify(status).includes('private-content'));
   }
   assert.equal(snapshot(), before); assert.equal(f.prompts.length, 0); assert.equal(f.creates.length, 0);
+});
+
+for (const archived of [true, false]) test(`replace a confirmed ${archived ? 'archived' : 'missing'} main and preserve unread`, async t => {
+  let archivedId;
+  const f = fixture(t, { readWorkspaces: async () => ({
+    items: [{ workspaceId: 'shared', sessionIds: f.sid ? [f.sid] : [] }],
+    archivedSessionIds: archivedId ? [archivedId] : [],
+  }) });
+  f.add('group:1','first'); await f.runtime.tick();
+  const original = f.sid, oldToken = f.token;
+  if (archived) archivedId = original;
+  else f.removeSession();
+  f.add('group:1','later');
+  await f.runtime.tick();
+  assert.notEqual(f.sid,original);
+  assert.equal(f.creates.length,2);
+  assert.equal(f.runtime.store.counts('100')[0].unread,2);
+  assert.deepEqual(JSON.parse(f.prompts[1].content[0].text).messages.map(m=>m.text),['later']);
+  await assert.rejects(f.runtime.tools.call(oldToken,'qq_get_main_menu'),{code:'UNAUTHORIZED'});
+  await f.runtime.restore(); assert.equal(f.creates.length,2);
 });

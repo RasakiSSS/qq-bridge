@@ -22,6 +22,7 @@ export class UnifiedRuntime {
   #bindingTail = Promise.resolve();
   #frameTail = Promise.resolve();
   #closed = false;
+  #nextSessionCheck = 0;
   constructor({ file, cutoverInbox, getContext, isAllowed, isWakeAllowed, api, workspaceId,
     readWorkspaces, configureModel, bindMainTools, authenticateQQ, authenticateConsole,
     handlers = {}, prepareScene, beforeSession = async () => {}, initialWakeConfig, toolAllowed, fetchImage, chatReaders, sleepBounds, relationships, files, memory, summaries, readPersona, legacyCommand, now = Date.now }) {
@@ -40,6 +41,7 @@ export class UnifiedRuntime {
       if (cutoverInbox) this.cutoverInbox = openCutoverInbox({ ...cutoverInbox, store: this.store, account,
         assertOwner: () => { ownedContext(); } });
       this.api = api;
+      this.now = now;
       this.beforeSession = beforeSession;
       this.bindMainTools = bindMainTools;
       this.scenes = new UnifiedScenes({ store: this.store, getContext: ownedContext, isAllowed, now, prepare: prepareScene });
@@ -121,7 +123,14 @@ export class UnifiedRuntime {
     if (!sessionId) return { status: 'idle' };
     const identity = { account: before.account, sessionId };
     await this.beforeSession(identity);
-    await this.dsh.ensure(identity, { existingOnly: true, allowBusy: true });
+    try {
+      await this.dsh.ensure(identity, { existingOnly: true, allowBusy: true });
+    } catch (error) {
+      if (error.code !== 'MAIN_SESSION_REPLACED') throw error;
+      this.tools.revoke();
+      this.api.events.forget?.(sessionId);
+      return this.restore();
+    }
     await this.#bind(identity, before);
     this.api.events.follow(sessionId);
     return { status: 'following', sessionId };
@@ -151,7 +160,25 @@ export class UnifiedRuntime {
   wakeConfig(key) { this.#context(); return this.attention.config(key); }
   friendRequest(event) { this.#context(); if (!this.relationships) throw fail('ACTION_DENIED'); return this.cutoverInbox ? this.cutoverInbox.friendRequest(event) : this.relationships.ingest(event); }
   tick() {
-    this.#context(); this.attention.materialize();
+    const ctx = this.#context(); this.attention.materialize();
+    return this.#tick(ctx);
+  }
+  async #tick(ctx) {
+    // An accepted/uncertain dispatch blocks further claims, so the normal
+    // preflight alone cannot notice a session archived between turns.
+    const active = this.store.active(ctx.account);
+    if (!ctx.paused && ctx.enabled !== false && !this.store.account(ctx.account).paused
+        && active && ['accepted','unknown','dispatching'].includes(active.status) && this.now() >= this.#nextSessionCheck) {
+      this.#nextSessionCheck = this.now() + 60000;
+      try {
+        await this.dsh.ensure({account:ctx.account, sessionId:active.session_id}, {existingOnly:true, allowBusy:true});
+      } catch (error) {
+        if (error.code === 'MAIN_SESSION_REPLACED') {
+          this.api.events.forget?.(active.session_id);
+          await this.restore();
+        } else if (error.code !== 'MAIN_SESSION_BUSY') throw error;
+      }
+    }
     return this.scheduler.tick().then(async result => {
       await this.summaries?.tick();
       return result;

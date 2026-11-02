@@ -78,6 +78,7 @@ export class UnifiedDshSession {
     if (typeof sessionId !== 'string' || !sessionId) throw fail('INVALID_SESSION');
     // This intent survives missing create responses. The scheduler has already
     // persisted the session ID; this adapter never chooses a replacement ID.
+    const priorBinding = this.store.db.prepare('SELECT status FROM session_bindings WHERE account=?').get(account);
     const binding = this.store.transaction(() => {
       this.store.db.prepare(`INSERT OR IGNORE INTO session_bindings(account,session_id,workspace_id,preset,status)
         VALUES(?,?,?,?,'creating')`).run(account, sessionId, workspaceId, preset);
@@ -87,7 +88,7 @@ export class UnifiedDshSession {
     });
     const inspect = async () => {
       const list = value(await this.api.sessions.list({})); check();
-      if (!Array.isArray(list?.items) || list.hasMore === true) throw fail('INVALID_SESSION_LIST');
+      if (!Array.isArray(list?.items) || list.hasMore === true || list.nextCursor || list.items.some(row => typeof row?.sessionId !== 'string' || !row.sessionId)) throw fail('INVALID_SESSION_LIST');
       const matches = list.items.filter(row => row.sessionId === sessionId);
       if (matches.length > 1) throw fail('INVALID_SESSION_LIST');
       const projection = value(await this.api.callUnary('session/projections', { sessionId })); check();
@@ -95,8 +96,14 @@ export class UnifiedDshSession {
     };
     let state = await inspect();
     if (!state.row) {
-      if (existingOnly) throw fail('MAIN_SESSION_MISSING');
-      // A previously bound identity disappearing is not permission to reset it.
+      if (binding.status === 'bound' && state.projection === null) {
+        const workspaces = await this.readWorkspaces(); check();
+        this.#workspace(workspaces, sessionId, false, true);
+        if (workspaces.items.every(row => !row.sessionIds.includes(sessionId)) || workspaces.archivedSessionIds.includes(sessionId))
+          this.#replace(account, sessionId);
+      }
+      if (existingOnly && priorBinding?.status !== 'creating') throw fail('MAIN_SESSION_MISSING');
+      // Conflicting evidence is not a confirmed disappearance.
       if (binding.status === 'bound' || state.projection !== null) throw fail('MAIN_SESSION_MISSING');
       if (binding.create_attempted) throw fail('SESSION_CREATION_UNCERTAIN');
       const workspaces = await this.readWorkspaces(); check();
@@ -114,6 +121,12 @@ export class UnifiedDshSession {
     if (projection?.kind !== 'sequenced' || !Number.isSafeInteger(projection.asOfSeq)
       || projection.asOfSeq < -1 || projection.values?.agentPreset !== preset) throw fail('UNSAFE_MAIN_PRESET');
     const workspaces = await this.readWorkspaces(); check();
+    if (binding.status === 'bound' && workspaces?.archivedSessionIds?.includes(sessionId)) {
+      this.#workspace(workspaces, sessionId, true, true);
+      if (row.running !== false || projection.values.inbox?.['next-turn']?.length !== 0
+          || projection.values.inbox?.['next-step']?.length !== 0) throw fail('MAIN_SESSION_BUSY');
+      this.#replace(account, sessionId);
+    }
     this.#workspace(workspaces, sessionId, true);
     if (!allowBusy && row.running === true) throw fail('MAIN_SESSION_BUSY');
     const inbox = projection.values.inbox;
@@ -122,12 +135,29 @@ export class UnifiedDshSession {
     this.store.db.prepare("UPDATE session_bindings SET status='bound' WHERE account=?").run(account);
     return sessionId;
   }
-  #workspace(baseline, sessionId, requireMember) {
+  #replace(account, oldId) {
+    const nextId = `session-${randomUUID()}`;
+    this.store.transaction(() => {
+      const db = this.store.db;
+      const swapped = db.prepare("UPDATE session_bindings SET session_id=?,status='creating',create_attempted=0 WHERE account=? AND session_id=? AND status='bound'").run(nextId, account, oldId);
+      if (!swapped.changes) throw fail('IDENTITY_CHANGED');
+      db.prepare('UPDATE accounts SET session_id=?,current_scene=NULL,generation=generation+1,retry_at=0,failures=0 WHERE account=? AND session_id=?').run(nextId, account, oldId);
+      // An issued prompt may have acted. Preserve unread and retire its wake
+      // notification without replaying its side effects in another session.
+      db.prepare(`UPDATE events SET notified=1 WHERE account=? AND seq IN
+        (SELECT e.seq FROM dispatch_events e JOIN dispatches d ON d.id=e.dispatch
+         WHERE d.account=? AND d.session_id=? AND d.status IN ('dispatching','unknown','accepted'))`).run(account,account,oldId);
+      db.prepare("UPDATE dispatches SET status='deferred' WHERE account=? AND session_id=? AND status IN ('dispatching','unknown','accepted','preparing')").run(account,oldId);
+      db.prepare('UPDATE summary_jobs SET main_session=? WHERE account=? AND main_session=?').run(nextId,account,oldId);
+    });
+    throw fail('MAIN_SESSION_REPLACED');
+  }
+  #workspace(baseline, sessionId, requireMember, allowArchived = false) {
     if (!Array.isArray(baseline?.items) || !Array.isArray(baseline.archivedSessionIds)
       || baseline.items.some(row => !Array.isArray(row.sessionIds))) throw fail('INVALID_WORKSPACE_BASELINE');
     const target = baseline.items.filter(row => row.workspaceId === this.workspaceId);
     const owners = baseline.items.filter(row => row.sessionIds.includes(sessionId));
-    if (target.length !== 1 || baseline.archivedSessionIds.includes(sessionId)
+    if (target.length !== 1 || (!allowArchived && baseline.archivedSessionIds.includes(sessionId))
       || owners.some(row => row.workspaceId !== this.workspaceId) || owners.length > 1
       || (requireMember && owners.length !== 1)) throw fail('SESSION_WORKSPACE_MISMATCH');
   }
