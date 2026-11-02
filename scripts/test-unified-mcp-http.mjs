@@ -7,8 +7,11 @@ import { UnifiedScenes } from '../src/unified/scenes.js';
 import { UnifiedTools } from '../src/unified/tools.js';
 import { startUnifiedMcpHttp, IDENTITY_META } from '../src/unified/mcp-http.js';
 import { invokeMainTool, apply } from '../plugins/qq-agent-presets/qq-unified-client.mjs';
-import { apply as guard } from '../plugins/qq-agent-presets/qq-unified-guard.mjs';
-import { readFileSync } from 'node:fs';
+import { apply as guard, nativeAllowed } from '../plugins/qq-agent-presets/qq-unified-guard.mjs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { renderPatch, patchFileFor } from './build-agent-preset-patches.mjs';
 
 async function fixture(t, beforeDispatch = async () => {}) {
@@ -114,4 +117,21 @@ test('revoked credential cannot discover or execute tools; malformed and oversiz
   const response = await f.post({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
   assert.equal(response.status, 401); assert.ok(!(await response.text()).includes(f.token));
   assert.equal(f.calls.length, 0);
+});
+
+test('native DSH access tracks the bound main session, live permission and pause', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'qq-native-policy-'));
+  const base = pathToFileURL(directory + path.sep);
+  const store = new UnifiedStore(path.join(directory,'unified.sqlite'));
+  t.after(() => { store.close(); rmSync(directory,{recursive:true,force:true}); });
+  store.account('100');
+  store.db.prepare("UPDATE accounts SET session_id='main'").run();
+  assert.equal(nativeAllowed('main',base),false);
+  writeFileSync(new URL('unified-mcp.json',base),JSON.stringify({version:1,sessionId:'main'}));
+  assert.equal(nativeAllowed('main',base),true);
+  assert.equal(nativeAllowed('worker',base),false);
+  for (const [level,paused,expected] of [['v2',0,false],['v3',1,false],['v3',0,true]]) {
+    store.db.prepare('UPDATE accounts SET permission=?,paused=?').run(level,paused);
+    assert.equal(nativeAllowed('main',base),expected);
+  }
 });
