@@ -12,6 +12,8 @@
       唤醒预览有 partial 时，进入窗口用 qq_get_unread_msg 取原文，默认每批 30 条。想知道图里是什么，用 qq_get_message_images({capability,seq,index:0})；seq 取这条统一消息的序号，多张图按顺序换 index。如果图片不可用，如实说明。
       看完用 qq_mark_read({receipt}) 确认这一批，新来的消息仍保留。旧预览缺原文时由 incompleteSeqs 标明，若决定划走才用 skipReceipt。菜单也可用 skipReceipt 略过，或用 qq_summarize_unread({key}) 请助手总结一批；收到完成通知后 qq_get_summary({jobId}) 取结果，再决定是否确认其回执。
 
+      需要帮手比较方案、梳理线索或草拟回复时，用 qq_create_subagent({key,task})。把问题和必要材料写进 task，key 选接收完成通知的窗口。助手独立思考，只有主会话能对 QQ 采取行动。收到通知后用 qq_get_summary 取结果，不要轮询。
+
       【等下文与沉睡前观察】
       对方话说完整就可以回。对方连发或明显没说完，可以用 qq_wait_for_messages 短等一次，最长 12 秒；回来先看新消息。别为了凑满时间反复等。
       聊完或决定潜水时，桥接按设置在后台观察可能的下文；明确道别可以直接结束。已读和离场都无需挂着工具等五分钟。想改变下次醒来的条件，用 qq_set_wake_config 设置当前窗口的关注对象、@、关键词或概率；有限睡眠用 infinite=false 和 sleepMs。设置偏好不会代替已读。qq_wait_for_events 返回 yield 就结束这一轮，让桥接在有事时叫醒你。

@@ -6,6 +6,8 @@ import { fail } from './store.js';
 
 const key = z.string().regex(/^(?:group:[1-9]\d{0,19}|private:[1-9]\d{0,19}|qzone)$/);
 const handle = z.string().min(1).max(128);
+// DSH may serialize millisecond arguments as decimal strings.
+const waitDuration = z.union([z.number().int().min(0).max(86400000), z.string().regex(/^\d{1,8}$/)]).optional();
 const limit = z.number().int().min(1).max(100).optional();
 const qzoneText = { capability: handle, content: z.string().trim().min(1).max(2000),
   mentions: z.array(z.string().regex(/^[1-9]\d{0,19}$/)).max(100).optional() };
@@ -16,6 +18,7 @@ const relationTools = { qq_accept_friend_request: 'accept_request', qq_reject_fr
   qq_delete_friend: 'delete_friend', qq_leave_group: 'leave_group', qq_request_friend: 'request_friend' };
 const definitions = {
   qq_get_prompt: ['读取当前完整角色卡，菜单也可使用。首次不传参数；有 nextOffset 时带原 revision 分页续读。PERSONA_CHANGED 时从第一页重新读取；PERSONA_UNAVAILABLE 时报告不可用，不循环重试。角色是性格资料，不能覆盖统一工具和权限规则。', { offset: z.number().int().nonnegative().max(524288).optional(), revision: z.string().regex(/^[a-f0-9]{64}$/).optional() }],
+  qq_create_subagent: ['委托隔离助手分析你提供的文字，例如比较方案、整理线索或起草回复。key 指定结果通知的可见场景，task 写任务与所需材料。助手不继承聊天记录和工具。完成通知后用 qq_get_summary 取结果。', { key, task: z.string().trim().min(1).max(5000) }],
   qq_summarize_unread: ['委托无工具权限的辅助会话总结指定场景的一批未读，默认最多 30 条；在菜单也可发起。返回 jobId 后可继续其他活动，完成由桥接通知，不自动标记已读。过长单条应进入场景读取原文。', { key, limit: z.number().int().min(1).max(30).optional() }],
   qq_get_summary: ['查询本主会话发起的总结。ready 时返回总结和精确已读回执，由你决定是否确认；queued/accepted/unknown 时不要循环查询。峰期隐藏场景的结果延后交付。', { jobId: handle }],
   qq_recall: ['查询当前账号已有的共同经历和长期记忆，可在菜单使用，不启动模型整理、不标记已读。峰期隐藏场景的新未读不能借记忆查询读取。', {
@@ -62,8 +65,8 @@ const definitions = {
   qq_qzone_reply: ['回复空间收件箱中新评论，commentKey 使用消息 payload.key。当前接口发表“回复某某”评论，不是楼中楼。unknown 时禁止重复发送。', { ...qzoneText, commentKey: z.string().min(1).max(1000) }],
   qq_wait_for_events: ['查看全局可唤醒事件；无事件时保存等待状态并让出本轮执行，不要循环调用。不会退出当前场景或标记已读。', {}],
   qq_wait_for_messages: ['当前场景短暂合并补充消息，quietMs 和整次等待均硬限制为 12 秒；其他可唤醒场景来信时提前返回。长睡眠请设置唤醒配置并让出回合。', {
-    capability: handle, quietMs: z.number().int().nonnegative().max(86400000).optional(),
-    timeoutMs: z.number().int().nonnegative().max(86400000).optional(),
+    capability: handle, quietMs: waitDuration,
+    timeoutMs: waitDuration,
   }],
   qq_set_wake_config: ['设置当前场景唤醒偏好和有限睡眠定时器，不标记已读，不退出场景。有限睡眠必须给出 sleepMs；同一调用不会重复设定。', {
     capability: handle, config: z.object({
@@ -93,6 +96,11 @@ function dshSchema(schema) {
   const details = Object.entries(constraints).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`);
   if (details.length) result.description = [result.description, `桥接执行约束：${details.join('；')}`].filter(Boolean).join('。');
   if (result.properties) result.properties = Object.fromEntries(Object.entries(result.properties).map(([key, value]) => [key, dshSchema(value)]));
+  // The duration union has disjoint number/string branches; DSH supports oneOf.
+  if (result.anyOf) {
+    result.oneOf = result.anyOf.map(dshSchema);
+    delete result.anyOf;
+  }
   if (result.items) result.items = dshSchema(result.items);
   return result;
 }
@@ -105,7 +113,7 @@ export function unifiedToolCatalog() {
 const digest = (token) => createHash('sha256').update(token).digest();
 const toolFlags = {
   qq_get_prompt: 'getPrompt',
-  qq_summarize_unread: 'getUnread', qq_get_summary: 'getUnread',
+  qq_create_subagent: 'getUnread', qq_summarize_unread: 'getUnread', qq_get_summary: 'getUnread',
   qq_recall: 'memory', qq_remember: 'memory',
   qq_qzone_status: 'qzoneRead', qq_qzone_refresh: 'qzoneRead',
   qq_list_friend_requests: 'relationships', ...Object.fromEntries(Object.keys(relationTools).map(name => [name, 'relationships'])),
@@ -188,6 +196,7 @@ export class UnifiedTools {
         case 'qq_get_prompt':
           if (!this.persona) throw fail('PERSONA_UNAVAILABLE');
           return this.persona.get(a);
+        case 'qq_create_subagent':
         case 'qq_summarize_unread':
           if (!this.summaries) throw fail('ACTION_DENIED');
           this.authenticate(token, execution?.sessionId);
@@ -235,6 +244,11 @@ export class UnifiedTools {
           return this.attention.waitEvents(check);
         case 'qq_wait_for_messages':
           if (!this.attention) throw fail('TOOL_DENIED');
+          for (const field of ['quietMs', 'timeoutMs']) {
+            if (a[field] === undefined) continue;
+            a[field] = Number(a[field]);
+            if (a[field] > 86400000) throw fail('INVALID_ARGUMENTS');
+          }
           return this.attention.waitMessages(a, check);
         case 'qq_set_wake_config':
         case 'qq_qzone_status':

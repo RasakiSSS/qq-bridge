@@ -154,3 +154,17 @@ test('summary worker refuses legacy preview without creating a job or advancing 
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM summary_jobs').get().n, 0);
   assert.equal(f.prompts.length, 0);
 });
+
+test('delegated text task works without unread, deduplicates and exposes no source receipts', async t => {
+  const f = fixture(t,0), token = f.tools.issueMainCredential();
+  const start = task => f.tools.call(token,'qq_create_subagent',{key:'group:300',task},{sessionId:'main',callId:'draft'});
+  const work = await start('draft a reply');
+  assert.equal(work.status,'queued'); assert.equal((await start('draft a reply')).jobId,work.jobId);
+  await assert.rejects(start('different task'),{code:'ACTION_ID_CONFLICT'});
+  await f.summary.tick();
+  assert.match(f.prompts[0].content[0].text,/draft a reply/);
+  const job = f.job(work.jobId); feed(f.summary, job, events(job,[]));
+  const result = f.summary.get(job.id);
+  assert.equal(result.status,'ready'); assert.deepEqual(result.result.coveredSeqs,[]);
+  assert.equal(f.scenes.markRead(result.receipt).marked,0);
+});

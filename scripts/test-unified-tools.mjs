@@ -94,7 +94,7 @@ test('real MCP list/call transport exposes only registered tools, keeps credenti
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(a); await client.connect(b);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 28);
+  assert.equal(list.tools.length, 29);
   assert.ok(!JSON.stringify(list).includes(f.token));
   assert.ok(!JSON.stringify(list).includes('ownerQQ'));
   const joined = await client.callTool({ name: 'qq_join_session', arguments: { key: 'group:1' } });
@@ -144,4 +144,20 @@ test('image lookup scopes source and credential to the current chat', async t =>
   assert.equal((await get(here)).data,Buffer.from('fixture').toString('base64'));
   f.tools.fetchImage = async item => { f.tools.revoke(); return fetch(item); };
   await assert.rejects(get(here),{code:'UNAUTHORIZED'});
+});
+
+test('decimal string wait durations pass MCP validation and reach the timer as numbers', async t => {
+  const f = fixture(t);
+  f.tools.attention = { waitMessages: args => args };
+  const server = createUnifiedMcpServer({dispatch:(name,args)=>f.call(name,args)});
+  const client = new Client({name:'test',version:'1'});
+  const [a,b] = InMemoryTransport.createLinkedPair();
+  t.after(async()=>{await client.close(); await server.close();});
+  await server.connect(a); await client.connect(b);
+  const call = (quietMs,timeoutMs) => client.callTool({name:'qq_wait_for_messages',arguments:{capability:'fixture',quietMs,timeoutMs}});
+  for (const values of [['4000','12000'],[4000,12000]]) {
+    const result = await call(...values);
+    assert.deepEqual(JSON.parse(result.content[0].text),{capability:'fixture',quietMs:4000,timeoutMs:12000});
+  }
+  for (const invalid of ['',null,'12s','-2','1.5','99999999']) assert.ok((await call(invalid,12000)).isError);
 });
