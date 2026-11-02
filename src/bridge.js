@@ -12441,6 +12441,14 @@ async function main() {
           assertInstallationOwner: assertUnifiedInstallation, isExcludedFromModelFiles: unifiedBindingExcluded,
           runtimeOptions: {
             fetchImage: fetchOneBotImage,
+            chatReaders: {
+              qq_get_my_recent_messages: (key, {limit = 10}) => getSocialV2State(key).recentMessages.filter(item => item.isSelf).slice(-limit),
+              qq_slang_query: (_key, {q = '', limit = 30}) => {
+                const term = q.trim().toLowerCase();
+                return confirmedSlangListV2().filter(entry => [entry.content, entry.meaning, entry.usage, entry.example]
+                  .some(value => value.toLowerCase().includes(term))).slice(0, limit);
+              },
+            },
             cutoverInbox: { file: path.join(STATE_DIR, 'migration-ingress.sqlite'), verifyPrivate: isHardened, excluded: unifiedBindingExcluded,
               wakeAllowed: row => row.kind === 'message' ? !!row.payload.reason : row.payload.mentioned === true
                 || (row.kind === 'qzone-comment' && cfg.socialV2?.qzone?.autoReplyComments !== false) },

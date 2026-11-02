@@ -215,6 +215,36 @@ export class UnifiedScenes {
     this.store.db.prepare("UPDATE receipts SET status='delivered' WHERE id=?").run(job);
     return { receipt: job, key: row.scene, result: JSON.parse(row.result) };
   }
+  history(name, args) {
+    const { account, key } = this.authorize(args.capability);
+    const db = this.store.db;
+    const where = "FROM events WHERE account=? AND scene=? AND kind='message'";
+    if (name === 'qq_get_active_members') {
+      return db.prepare(`SELECT json_extract(payload,'$.senderQQ') AS userId, MAX(seq) AS lastSeq,
+        at AS lastSeen, json_extract(payload,'$.sender') AS name ${where}
+        AND json_type(payload,'$.senderQQ')='text' GROUP BY userId ORDER BY lastSeq DESC LIMIT ?`)
+        .all(account, key, args.limit ?? 10);
+    }
+    const ctx = this.context();
+    const describe = row => {
+      const payload = JSON.parse(row.payload);
+      return { seq: row.seq, at: row.at, verifiedOwnerPrivate: this.verifiedOwnerPrivate(row, payload, ctx), payload };
+    };
+    if (name === 'qq_get_message_detail') {
+      const id = String(args.messageId);
+      const row = db.prepare(`SELECT * ${where} AND source_id=?`).get(account, key, id)
+        ?? (/^[1-9]\d*$/.test(id) && db.prepare(`SELECT * ${where} AND seq=?`).get(account, key, id));
+      return row ? describe(row) : null;
+    }
+    const messages = [];
+    let bytes = 0;
+    for (const row of db.prepare(`SELECT * ${where} ORDER BY seq DESC LIMIT ? OFFSET ?`).iterate(account, key, args.limit ?? 20, args.offset ?? 0)) {
+      bytes += Buffer.byteLength(row.payload) + 128;
+      if (bytes > 196608) break;
+      messages.push(describe(row));
+    }
+    return messages;
+  }
   markRead(id, afterRead) {
     const ctx = this.context();
     return this.store.transaction(() => {

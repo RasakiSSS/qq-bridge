@@ -94,7 +94,7 @@ test('real MCP list/call transport exposes only registered tools, keeps credenti
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(a); await client.connect(b);
   const list = await client.listTools();
-  assert.equal(list.tools.length, 29);
+  assert.equal(list.tools.length, 34);
   assert.ok(!JSON.stringify(list).includes(f.token));
   assert.ok(!JSON.stringify(list).includes('ownerQQ'));
   const joined = await client.callTool({ name: 'qq_join_session', arguments: { key: 'group:1' } });
@@ -160,4 +160,17 @@ test('decimal string wait durations pass MCP validation and reach the timer as n
     assert.deepEqual(JSON.parse(result.content[0].text),{capability:'fixture',quietMs:4000,timeoutMs:12000});
   }
   for (const invalid of ['',null,'12s','-2','1.5','99999999']) assert.ok((await call(invalid,12000)).isError);
+});
+
+test('recent history, details and active speakers stay scene-bound without acknowledging messages', async t => {
+  const f = fixture(t);
+  for (const [key,id,sender] of [['group:1','-101','201'],['group:1','-102','202'],['group:2','-103','203']])
+    f.store.append({account:'100',scene:key,sourceId:id,payload:{senderQQ:sender,text:id},at:1});
+  const {capability} = await f.call('qq_join_session',{key:'group:1'});
+  const history = await f.call('qq_get_recent_messages',{capability,limit:1,offset:1});
+  assert.equal(history[0].payload.text,'-101');
+  assert.equal((await f.call('qq_get_message_detail',{capability,messageId:history[0].seq})).payload.text,'-101');
+  assert.equal(await f.call('qq_get_message_detail',{capability,messageId:'-103'}),null);
+  assert.deepEqual((await f.call('qq_get_active_members',{capability})).map(m=>m.userId),['202','201']);
+  assert.equal(f.store.counts('100')[0].unread,2);
 });

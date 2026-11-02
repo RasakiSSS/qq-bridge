@@ -58,6 +58,11 @@ const definitions = {
   qq_join_session: ['进入群聊、私聊或空间。峰期禁止新进入普通场景，失败保留原场景。', { key }],
   qq_quit_session: ['退出当前场景并返回主菜单。峰期退出后不能重新进入普通场景。', {}],
   qq_get_unread_msg: ['读取当前场景原文，默认一批 30 条；不会自动标记已读。incompleteSeqs 表示只有旧预览，read 回执不覆盖这些消息；若明确决定略过可使用额外 skipReceipt。', { capability: handle, limit }],
+  qq_get_my_recent_messages: ['查看当前聊天里自己最近实际发出的消息。', { capability: handle, limit: z.number().int().min(1).max(50).optional() }],
+  qq_slang_query: ['在已确认的黑话库中按词条、含义、用法或例句查询。', { capability: handle, q: z.string().max(200).optional(), limit }],
+  qq_get_recent_messages: ['查看当前聊天的最近消息，按时间从新到旧返回。offset 用于翻页，不改已读。', { capability: handle, limit, offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional() }],
+  qq_get_message_detail: ['查看当前聊天一条消息的正文和媒体资料，按 QQ messageId 或统一 seq 查询。', { capability: handle, messageId: z.union([z.string().min(1).max(512), z.number().int()]) }],
+  qq_get_active_members: ['列出当前聊天最近发言的人及最后发言时间。', { capability: handle, limit: z.number().int().min(1).max(20).optional() }],
   qq_get_message_images: ['查看当前聊天消息的图片或表情。seq 使用统一收件箱序号，index 从 0 开始，按图片和表情的顺序计数。', { capability: handle, seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER), index: z.number().int().nonnegative().optional() }],
   qq_mark_read: ['确认已读或明确略过回执中的消息；不会清除回执之后到达的消息。', { receipt: handle }],
   qq_qzone_publish: ['在已进入的空间发表文字说说；可见范围、每日额度和间隔由可信配置决定。unknown 时禁止重复发送。', qzoneText],
@@ -117,6 +122,7 @@ const toolFlags = {
   qq_recall: 'memory', qq_remember: 'memory',
   qq_qzone_status: 'qzoneRead', qq_qzone_refresh: 'qzoneRead',
   qq_list_friend_requests: 'relationships', ...Object.fromEntries(Object.keys(relationTools).map(name => [name, 'relationships'])),
+  qq_get_my_recent_messages: 'getMyRecent', qq_slang_query: 'slangQuery', qq_get_recent_messages: 'getRecent', qq_get_message_detail: 'getMessageDetail', qq_get_active_members: 'getActiveMembers',
   qq_get_message_images: 'getImages', qq_get_unread_msg: 'getUnread', qq_mark_read: 'markRead', qq_send_message: 'sendMessage',
   qq_wait_for_events: 'waitMessages', qq_wait_for_messages: 'waitMessages', qq_set_wake_config: 'setWakeConfig',
   qq_qzone_publish: 'qzonePublish', qq_qzone_comment: 'qzoneComment', qq_qzone_reply: 'qzoneComment',
@@ -128,10 +134,10 @@ const toolFlags = {
 export class UnifiedTools {
   #credential;
   #tail = Promise.resolve();
-  constructor({ scenes, actions, attention, relationships, memory, summaries, persona, fetchImage, toolAllowed = () => true }) {
+  constructor({ scenes, actions, attention, relationships, memory, summaries, persona, fetchImage, chatReaders = {}, toolAllowed = () => true }) {
     this.scenes = scenes; this.actions = actions; this.attention = attention; this.toolAllowed = toolAllowed;
     this.relationships = relationships;
-    this.memory = memory; this.fetchImage = fetchImage;
+    this.memory = memory; this.fetchImage = fetchImage; this.chatReaders = chatReaders;
     this.summaries = summaries; this.persona = persona;
   }
   #checkTool(name) { if (toolFlags[name] && this.toolAllowed(toolFlags[name]) !== true) throw fail('TOOL_DENIED'); }
@@ -227,6 +233,15 @@ export class UnifiedTools {
           return this.scenes.quit(check);
         }
         case 'qq_get_unread_msg': return this.scenes.read(a.capability, a.limit);
+        case 'qq_get_my_recent_messages':
+        case 'qq_slang_query': {
+          const {key} = this.scenes.authorize(a.capability);
+          if (key === 'qzone' || !this.chatReaders[name]) throw fail('SCENE_DENIED');
+          return this.chatReaders[name](key, a);
+        }
+        case 'qq_get_recent_messages':
+        case 'qq_get_message_detail':
+        case 'qq_get_active_members': return this.scenes.history(name, a);
         case 'qq_get_message_images': {
           const cap = this.scenes.authorize(a.capability);
           const event = this.scenes.store.db.prepare("SELECT payload FROM events WHERE account=? AND scene=? AND seq=? AND kind='message'").get(cap.account, cap.key, a.seq);
